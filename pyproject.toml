@@ -66,6 +66,7 @@ include = ["flashinfer_bench*"]
 
 [tool.setuptools.package-data]
 "flashinfer_bench" = ["py.typed"]
+"flashinfer_bench.onboarding" = ["sharegpt_100.json"]
 "flashinfer_bench._deps.cutlass" = ["include/**"]
 
 [tool.black]
