@@ -20,6 +20,7 @@ from flashinfer_bench.onboarding.proposal.gate import run_proposal_gate
 from flashinfer_bench.onboarding.proposal.workflow.diagnose import diagnose_run
 from flashinfer_bench.onboarding.proposal.workflow.merge import merge_proposals
 from flashinfer_bench.onboarding.proposal.workflow.prepare import prepare_agent_inputs
+from flashinfer_bench.onboarding.proposal.workflow.promote import promote_approved_targets
 from flashinfer_bench.onboarding.proposal.workflow.repair import repair_loop
 from flashinfer_bench.onboarding.proposal.workflow.spawn import spawn_agents
 
@@ -147,6 +148,18 @@ def _add_merge_proposals_parser(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--output-dir", type=Path, required=True, help="Output proposal directory.")
 
 
+def _add_promote_approved_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "promote-approved",
+        help="Write config/approved_targets.json from proposal candidates marked status=approved.",
+    )
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--run", type=Path, help="Run path or path relative to runs/.")
+    source.add_argument("--proposal-dir", type=Path, help="Proposal directory, or run directory containing proposal/.")
+    parser.add_argument("--config-dir", type=Path, help="Config directory. Defaults to <run>/config.")
+    parser.add_argument("--output", type=Path, help="Output approved_targets.json path.")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Offline proposal onboarding tools")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -156,6 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_repair_loop_parser(subparsers)
     _add_spawn_agents_parser(subparsers)
     _add_merge_proposals_parser(subparsers)
+    _add_promote_approved_parser(subparsers)
     return parser
 
 
@@ -276,6 +290,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"review: {args.output_dir / 'merge_review.md'}")
         print(f"report: {args.output_dir / 'merge_report.json'}")
         return 0 if summary["ok"] else 1
+
+    if args.command == "promote-approved":
+        result = promote_approved_targets(
+            run=args.run,
+            proposal_dir=args.proposal_dir,
+            config_dir=args.config_dir,
+            output_path=args.output,
+        )
+        summary = result["summary"]
+        print(f"approved targets: {summary['approved']}")
+        print(f"skipped candidates: {summary['skipped']}")
+        print(f"definitions: {summary['definitions']}")
+        print(f"definition hints: {summary['definition_hints']}")
+        print(f"output: {result['outputs']['approved_targets']}")
+        return 0
 
     raise SystemExit(f"ERROR: unknown command {args.command}")
 

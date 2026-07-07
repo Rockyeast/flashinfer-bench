@@ -57,6 +57,7 @@ sglang_*.jsonl
 
 # Local onboarding visualization drafts/generated HTML
 docs/viz_src/
+docs/重构可视化.html
 flashinfer_bench_map.html
 flashinfer_bench_onboarding_map.html
 

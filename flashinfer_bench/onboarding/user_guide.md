@@ -86,7 +86,32 @@ Review:
 - `config/run_config.json`
 - `proposal/definitions/` and `proposal/definition_hints/` for non-FI targets
 
-Approve by writing reviewed artifacts:
+Approve targets by marking accepted entries in `proposal/candidate_targets.json`:
+
+```json
+{
+  "name": "gqa_decode",
+  "status": "approved",
+  "evidence": [
+    {
+      "kind": "source_location",
+      "value": "flashinfer/decode.py:BatchDecodeWithPagedKVCacheWrapper.run"
+    }
+  ],
+  "review_note": "Verified SGLang route reaches this wrapper."
+}
+```
+
+The human approval action is the `status: approved` change. Then promote approved targets:
+
+```bash
+python3 -B -m flashinfer_bench.onboarding.proposal_tools promote-approved \
+  --run <model>/<run_id>
+```
+
+`promote-approved` writes `config/approved_targets.json` with only runtime fields. For approved `definition_source=agent` targets, it also copies the matching `proposal/definitions/` and `proposal/definition_hints/` JSON files into `config/`. It drops proposal-only review fields such as `status`, `evidence`, and `review_note`.
+
+Reviewed artifacts live under:
 
 ```text
 runs/<model>/<run_id>/config/
@@ -103,7 +128,7 @@ Minimum approval checklist:
 - Attention wrappers usually target the decorated `.run`; use `.forward` only as a companion when it passes arguments into `.run`.
 - `definition_name` for fitrace-backed targets is only a preview; the final name comes from the fitrace dump.
 - Known collectable non-FI ops, currently `rmsnorm` and `silu_and_mul`, have review-only definition/hints drafts before approval.
-- Non-FI drafts are promoted from `proposal/definitions/` and `proposal/definition_hints/` into `config/definitions/` and `config/definition_hints/`.
+- Non-FI drafts are promoted automatically for approved `definition_source=agent` targets.
 
 Proposal tools do not approve anything. `check-proposal` and `repair-loop` only validate or repair proposal artifacts.
 

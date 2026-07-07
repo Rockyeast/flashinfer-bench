@@ -30,7 +30,16 @@ Workflow:
      --flashinfer-root agent_inputs/flashinfer/flashinfer
    ```
 
-3. Review the proposal and write approved inputs under `runs/<model>/<run_id>/config/`. This is a human edit step, not an automatic command.
+3. Review the proposal. For each accepted target in `proposal/candidate_targets.json`, set `status` to `approved`; leave rejected or undecided targets unapproved.
+
+   Promote the approved targets into runtime config:
+
+   ```bash
+   python3 -B -m flashinfer_bench.onboarding.proposal_tools promote-approved \
+     --run <model>/<run_id>
+   ```
+
+   `promote-approved` writes `config/approved_targets.json` by copying only runtime target fields. For approved `definition_source=agent` targets, it also copies the matching `proposal/definitions/` and `proposal/definition_hints/` JSON files into `config/`. Proposal-only fields such as `status`, `evidence`, and `review_note` are dropped automatically.
 
 4. Run collect:
 
