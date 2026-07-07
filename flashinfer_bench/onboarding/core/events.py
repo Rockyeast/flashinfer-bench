@@ -2,7 +2,7 @@
 
 This module owns the remote post-capture pipeline: parsing the remote internal
 event log into a deterministic report and turning captured call payloads into
-official-style workload entries (the sanitizer half).
+validator-ready workload entries (the sanitizer half).
 """
 
 from __future__ import annotations
@@ -358,7 +358,7 @@ def load_capture_payload(path: Path) -> tuple[dict[str, Any] | None, str | None]
 
 
 # ---------------------------------------------------------------------------
-# Sanitizer: captured call payloads -> official-style workload entries
+# Sanitizer: captured call payloads -> validator-ready workload entries
 # ---------------------------------------------------------------------------
 
 

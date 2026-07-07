@@ -39,20 +39,17 @@ from flashinfer_bench.onboarding.core.planning import (
 from flashinfer_bench.onboarding.validation import (
     export_run_dataset,
     render_run_review_markdown,
-    run_official_validate,
+    run_dataset_validator,
     update_run_report,
     validate_run,
 )
-from flashinfer_bench.onboarding.proposal_tools import (
-    _sglang_config_compat_engine_kwargs,
-    check_proposal,
-    diagnose_run,
-    merge_proposals,
-    repair_loop,
-    run_agent_loop,
-    spawn_agents,
-    slug_model_name,
-)
+from flashinfer_bench.onboarding.proposal.checks.fitrace import _required_sglang_engine_kwargs
+from flashinfer_bench.onboarding.proposal.gate import check_proposal, run_proposal_gate
+from flashinfer_bench.onboarding.proposal.workflow.diagnose import diagnose_run
+from flashinfer_bench.onboarding.proposal.workflow.merge import merge_proposals
+from flashinfer_bench.onboarding.proposal.workflow.prepare import slug_model_name
+from flashinfer_bench.onboarding.proposal.workflow.repair import repair_loop
+from flashinfer_bench.onboarding.proposal.workflow.spawn import spawn_agents
 from flashinfer_bench.onboarding.core.schemas import ApprovedTarget, CaptureSpec, CollectPlan, CollectTarget, DefinitionRef, DispatchSpec, ProbePlan, ProbeTarget, WarmupHook
 
 def _capture_json(

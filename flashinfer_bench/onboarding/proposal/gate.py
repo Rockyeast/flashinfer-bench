@@ -1,4 +1,4 @@
-"""Proposal deterministic gate and agent feedback loop."""
+"""Proposal deterministic gate and checklist status update."""
 
 from __future__ import annotations
 
@@ -10,14 +10,12 @@ from .checks.merge_report import _check_merge_report
 
 def check_proposal(
     *,
-    candidates_path: Path,
+    proposal_dir: Path,
     hf_config_path: Path,
-    proposal_dir: Path | None = None,
     flashinfer_root: Path | None = None,
 ) -> dict[str, Any]:
     """Run all proposal checks in one review gate."""
-    if proposal_dir is None:
-        proposal_dir = candidates_path.parent
+    candidates_path = proposal_dir / "candidate_targets.json"
     candidate_fields = _check_candidate_fields(candidates_path)
     hf_config = _load_json(hf_config_path)
     if not isinstance(hf_config, dict):
@@ -70,14 +68,15 @@ def check_proposal(
     }
 
 
-def _proposal_feedback_markdown(report: dict[str, Any]) -> str:
+def _proposal_tool_status_markdown(report: dict[str, Any]) -> str:
     summary = report["summary"]
     findings = report.get("findings", [])
     status = "PASS" if summary["ok"] else "FIX_REQUIRED"
     lines = [
-        "# Agent Proposal Feedback",
+        "## Tool Status",
         "",
         f"- status: {status}",
+        "- source: check-proposal",
         f"- entries: {summary['entries']}",
         f"- collect candidates: {summary['collect_candidates']}",
         f"- fitrace targets: {summary['fitrace_targets']}",
@@ -124,32 +123,25 @@ def _proposal_feedback_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def run_agent_loop(
+def run_proposal_gate(
     *,
     proposal_dir: Path,
     hf_config_path: Path,
-    candidates_path: Path | None = None,
     flashinfer_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Run one deterministic proposal-check loop and write agent feedback.
+    """Run one deterministic proposal gate and update the review checklist.
 
-    The loop intentionally does not call an LLM. The external agent reads the
-    generated feedback, edits the proposal bundle, and invokes this command
+    This intentionally does not call an LLM. The external agent reads the
+    generated review checklist, edits the proposal bundle, and invokes check-proposal
     again until the check passes.
     """
     proposal_dir.mkdir(parents=True, exist_ok=True)
-    candidates = candidates_path or proposal_dir / "candidate_targets.json"
     check_report = check_proposal(
         proposal_dir=proposal_dir,
-        candidates_path=candidates,
         hf_config_path=hf_config_path,
         flashinfer_root=flashinfer_root,
     )
-    check_path = proposal_dir / "proposal_check.json"
-    feedback_path = proposal_dir / "agent_feedback.md"
-    loop_path = proposal_dir / "agent_loop.json"
-    _write_json(check_path, check_report)
-    feedback_path.write_text(_proposal_feedback_markdown(check_report), encoding="utf-8")
+    review_path = _write_review_tool_status(proposal_dir, _proposal_tool_status_markdown(check_report))
     result = {
         "summary": {
             "ok": check_report["summary"]["ok"],
@@ -158,14 +150,12 @@ def run_agent_loop(
             "warnings": check_report["summary"]["warnings"],
         },
         "proposal_dir": str(proposal_dir),
-        "candidates_path": str(candidates),
+        "candidates_path": str(proposal_dir / "candidate_targets.json"),
         "hf_config_path": str(hf_config_path),
         "flashinfer_root": str(flashinfer_root) if flashinfer_root is not None else None,
         "outputs": {
-            "check_report": str(check_path),
-            "feedback": str(feedback_path),
-            "loop_report": str(loop_path),
+            "review_checklist": str(review_path),
         },
+        "check_report": check_report,
     }
-    _write_json(loop_path, result)
     return result

@@ -105,7 +105,7 @@ def test_validate_run_accepts_fitrace_dump_name_over_preview(tmp_path: Path) -> 
 def test_run_review_markdown_lists_repaired_definitions() -> None:
     markdown = render_run_review_markdown(
         {
-            "summary": {"accepted": True, "internal_ok": True, "official_ok": True, "export_ok": True},
+            "summary": {"accepted": True, "internal_ok": True, "dataset_ok": True, "export_ok": True},
             "collect": {"manifest": {"summary": {"workloads": 1, "captures": 2, "workload_files": 3, "sanitized": 2}}},
             "definition_audit": {
                 "summary": {"raw": 2, "passed": 1, "repaired": 1, "rejected": 0},
@@ -120,7 +120,7 @@ def test_run_review_markdown_lists_repaired_definitions() -> None:
             },
             "export": {"summary": {"definitions": 1, "missing_definitions": 0}},
             "internal_validation": {"summary": {"errors": 0, "warnings": 0}, "findings": []},
-            "official_validation": {"ok": True, "returncode": 0},
+            "dataset_validation": {"ok": True, "returncode": 0},
         }
     )
 
@@ -128,7 +128,7 @@ def test_run_review_markdown_lists_repaired_definitions() -> None:
     assert "gqa_paged_decode_h32_kv128_d128_ps8 -> gqa_paged_decode_h32_kv8_d128_ps1" in markdown
     assert "gqa_paged_3d_cache_axes" in markdown
 
-def test_export_run_dataset_copies_official_layout(tmp_path: Path) -> None:
+def test_export_run_dataset_copies_validator_layout(tmp_path: Path) -> None:
     run_dir = tmp_path / "runs" / "demo"
     definition = tmp_path / "defs" / "rmsnorm" / "demo.json"
     definition.parent.mkdir(parents=True)
@@ -148,7 +148,7 @@ def test_export_run_dataset_copies_official_layout(tmp_path: Path) -> None:
     assert (dataset_dir / "workloads" / "rmsnorm" / "demo.jsonl").exists()
     assert (dataset_dir / "blob" / "workloads" / "rmsnorm" / "demo" / "x.safetensors").exists()
 
-def test_validate_cli_runs_internal_and_official_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_validate_cli_runs_internal_and_dataset_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     fake_bench = tmp_path / "flashinfer_bench" / "cli"
     fake_bench.mkdir(parents=True)
@@ -228,17 +228,14 @@ def test_validate_cli_runs_internal_and_official_checks(tmp_path: Path, monkeypa
     )
 
     assert "internal validation ok: True" in result.stdout
-    assert "official validation ok: True" in result.stdout
+    assert "dataset validation ok: True" in result.stdout
     assert "run accepted: True" in result.stdout
     assert "run report: runs/demo/reports/run_report.json" in result.stdout
     run_report = json.loads((run_dir / "reports" / "run_report.json").read_text(encoding="utf-8"))
     assert run_report["summary"]["accepted"] is True
     assert run_report["collect"]["manifest"]["summary"]["workloads"] == 1
     assert run_report["internal_validation"]["summary"]["ok"] is True
-    assert run_report["official_validation"]["ok"] is True
-    assert run_report["official_validation"]["returncode"] == 0
+    assert run_report["dataset_validation"]["ok"] is True
+    assert run_report["dataset_validation"]["returncode"] == 0
     assert (run_dir / "reports" / "review.md").exists()
-    assert not (run_dir / "validate" / "validation_report.json").exists()
     assert (run_dir / "output" / "definitions" / "rmsnorm" / "demo.json").exists()
-    assert not (run_dir / "official_validate" / "official_validation_report.json").exists()
-

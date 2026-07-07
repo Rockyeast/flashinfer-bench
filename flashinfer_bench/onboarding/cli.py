@@ -17,7 +17,7 @@ from flashinfer_bench.onboarding.core.planning import (
 )
 from flashinfer_bench.onboarding.validation import (
     export_run_dataset,
-    run_official_validate,
+    run_dataset_validator,
     update_run_report,
     validate_run,
 )
@@ -229,7 +229,7 @@ def _add_run_parser(subparsers: argparse._SubParsersAction) -> None:
 def _add_validate_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         "validate",
-        help="Run internal consistency checks, export the dataset, and run upstream validation.",
+        help="Run internal consistency checks, export the dataset, and run dataset validation.",
     )
     parser.add_argument("--run", required=True, help="Run path under runs/. Slash-separated names create nested run roots.")
 
@@ -431,7 +431,6 @@ def main(argv: list[str] | None = None) -> int:
             print("run accepted: False")
             return 1
 
-        official_dir = run_dir / "reports" / "official_validate_artifacts"
         export_report = export_run_dataset(
             run_dir=run_dir,
             output_dir=_run_output_dir(run_dir),
@@ -446,20 +445,18 @@ def main(argv: list[str] | None = None) -> int:
             print("run accepted: False")
             return 1
 
-        official_report = run_official_validate(
+        dataset_report = run_dataset_validator(
             dataset_dir=_run_output_dir(run_dir),
-            output_dir=official_dir,
             checks="layout,definition,workload",
-            outputs="stdout,json,text",
-            output_folder=None,
+            outputs="stdout",
             disable_gpu=True,
         )
-        update_run_report(run_dir, official_validation=official_report)
-        print(f"official validation ok: {official_report['ok']}")
-        print(f"returncode: {official_report['returncode']}")
+        update_run_report(run_dir, dataset_validation=dataset_report)
+        print(f"dataset validation ok: {dataset_report['ok']}")
+        print(f"returncode: {dataset_report['returncode']}")
         print(f"run report: {run_report_path}")
-        print(f"run accepted: {official_report['ok']}")
-        return 0 if official_report["ok"] else 1
+        print(f"run accepted: {dataset_report['ok']}")
+        return 0 if dataset_report["ok"] else 1
 
     raise AssertionError(f"unsupported command: {args.command}")
 

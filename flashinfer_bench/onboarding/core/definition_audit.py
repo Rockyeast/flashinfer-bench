@@ -154,7 +154,7 @@ def prepare_definition_for_output(
     events: list[dict[str, Any]] | None = None,
     hints: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[str], str | None]:
-    """Return an official-schema-ready definition or a blocking issue."""
+    """Return a validator-schema-ready definition or a blocking issue."""
     prepared = deepcopy(definition)
     fixes: list[str] = []
     repairer, issue = _definition_issue(prepared)
@@ -170,7 +170,7 @@ def prepare_definition_for_output(
     if reference_fix:
         fixes.append(reference_fix)
     fixes.extend(_fill_input_dtypes(prepared, events or [], hints))
-    issue = _official_schema_issue(prepared)
+    issue = _validator_schema_issue(prepared)
     return prepared, fixes, issue
 
 
@@ -451,7 +451,7 @@ def _capture_dtype(value: dict[str, Any] | None) -> str | None:
     return _normalize_dtype(summary.get("dtype"))
 
 
-def _official_schema_issue(definition: dict[str, Any]) -> str | None:
+def _validator_schema_issue(definition: dict[str, Any]) -> str | None:
     reference = definition.get("reference")
     if not isinstance(reference, str) or not reference.strip():
         return "missing_reference"

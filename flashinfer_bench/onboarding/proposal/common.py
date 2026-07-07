@@ -102,6 +102,33 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+TOOL_STATUS_START = "<!-- flashinfer-bench:tool-status:start -->"
+TOOL_STATUS_END = "<!-- flashinfer-bench:tool-status:end -->"
+
+
+def _write_review_tool_status(proposal_dir: Path, markdown: str) -> Path:
+    """Update the tool-managed status block in proposal/review_checklist.md."""
+    path = proposal_dir / "review_checklist.md"
+    block = f"{TOOL_STATUS_START}\n{markdown.rstrip()}\n{TOOL_STATUS_END}"
+    existing = path.read_text(encoding="utf-8") if path.exists() else "# Review Checklist\n"
+    start = existing.find(TOOL_STATUS_START)
+    end = existing.find(TOOL_STATUS_END)
+    if start != -1 and end != -1 and end >= start:
+        end += len(TOOL_STATUS_END)
+        updated = f"{existing[:start]}{block}{existing[end:]}"
+    else:
+        stripped = existing.rstrip()
+        lines = stripped.splitlines()
+        if lines and lines[0].startswith("# "):
+            rest = "\n".join(lines[1:]).lstrip()
+            updated = f"{lines[0]}\n\n{block}\n\n{rest}".rstrip()
+        else:
+            updated = f"{block}\n\n{stripped}".rstrip()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(updated.rstrip() + "\n", encoding="utf-8")
+    return path
+
+
 def _json_key(value: Any) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 

@@ -27,7 +27,7 @@ def test_check_proposal_rejects_agent_guessed_collect_definition(tmp_path: Path)
     hf_config = tmp_path / "config.json"
     hf_config.write_text("{}", encoding="utf-8")
 
-    report = check_proposal(candidates_path=targets, hf_config_path=hf_config)
+    report = check_proposal(proposal_dir=tmp_path, hf_config_path=hf_config)
 
     assert report["summary"]["ok"] is False
     assert any(
@@ -83,7 +83,7 @@ def test_check_proposal_allows_reviewed_non_fitrace_collect_candidate(tmp_path: 
         encoding="utf-8",
     )
 
-    report = check_proposal(candidates_path=targets, hf_config_path=hf_config)
+    report = check_proposal(proposal_dir=tmp_path, hf_config_path=hf_config)
 
     assert report["summary"]["ok"] is True
     assert report["summary"]["fitrace_targets"] == 0
@@ -127,7 +127,7 @@ def test_check_proposal_rejects_op_type_mismatch_with_trace_template(tmp_path: P
 
     candidates.write_text(json.dumps([dict(base_candidate, op_type="gdn_prefill")]), encoding="utf-8")
     failed = check_proposal(
-        candidates_path=candidates,
+        proposal_dir=tmp_path,
         hf_config_path=hf_config,
         flashinfer_root=flashinfer_root,
     )
@@ -137,7 +137,7 @@ def test_check_proposal_rejects_op_type_mismatch_with_trace_template(tmp_path: P
 
     candidates.write_text(json.dumps([dict(base_candidate, op_type="gdn")]), encoding="utf-8")
     passed = check_proposal(
-        candidates_path=candidates,
+        proposal_dir=tmp_path,
         hf_config_path=hf_config,
         flashinfer_root=flashinfer_root,
     )
@@ -292,7 +292,7 @@ def test_repair_loop_passes_prompt_to_agent_stdin_and_rechecks(tmp_path: Path) -
     seen_prompt = (proposal_dir / "seen_prompt.md").read_text(encoding="utf-8")
     assert "FIX_REQUIRED" in seen_prompt
     assert "extra_definition" in seen_prompt
-    assert (proposal_dir / "agent_loop.json").exists()
+    assert Path(result["outputs"]["repair_prompt"]).exists()
 
 def test_spawn_agents_generates_isolated_first_pass_prompts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
@@ -331,6 +331,8 @@ def test_spawn_agents_runs_external_agents_with_prompt_stdin(tmp_path: Path, mon
             "import sys",
             "from pathlib import Path",
             "prompt = sys.stdin.read()",
+            "print('agent stdout noise')",
+            "print('agent stderr noise', file=sys.stderr)",
             "run_dir = None",
             "for line in prompt.splitlines():",
             "    if line.startswith('run dir: '):",
@@ -367,6 +369,3 @@ def test_spawn_agents_runs_external_agents_with_prompt_stdin(tmp_path: Path, mon
         proposal = Path(item["proposal_dir"])
         assert item["returncode"] == 0
         assert (proposal / "seen_prompt.md").exists()
-        assert (proposal / "agent_stdout.log").exists()
-        assert (proposal / "agent_stderr.log").exists()
-

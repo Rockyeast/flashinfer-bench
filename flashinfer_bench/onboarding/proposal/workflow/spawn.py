@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import tempfile
+
 from ..common import *  # noqa: F403
-from ..checks.fitrace import _sglang_config_compat_engine_kwargs
+from ..checks.fitrace import _required_sglang_engine_kwargs
 from .merge import merge_proposals
 
 def _agent_suffix(index: int) -> str:
@@ -34,13 +36,13 @@ def first_pass_prompt_markdown(
     runtime_guidance: list[str] = []
     hf_config = _load_json(hf_config_path) if hf_config_path.exists() else {}
     if isinstance(hf_config, dict):
-        compat_kwargs = _sglang_config_compat_engine_kwargs(hf_config)
-        if compat_kwargs:
+        required_engine_kwargs = _required_sglang_engine_kwargs(hf_config)
+        if required_engine_kwargs:
             runtime_guidance.extend([
-                "Runtime config compatibility requirement:",
+                "Runtime config startup requirement:",
                 "",
                 "```json",
-                json.dumps({"engine_kwargs": compat_kwargs}, indent=2, ensure_ascii=False),
+                json.dumps({"engine_kwargs": required_engine_kwargs}, indent=2, ensure_ascii=False),
                 "```",
                 "",
                 "Include these `engine_kwargs` in `config/run_config.json`. They are required before SGLang can load this HF config.",
@@ -89,19 +91,19 @@ def first_pass_prompt_markdown(
         "Strictly follow `.claude/skills/review-onboarding-proposal/SKILL.md`.",
         "",
         "Do not apply or approve anything. Do not write `config/approved_targets.json`.",
-        "Do not write official `output/definitions`, `output/workloads`, or `output/blob`.",
+        "Do not write runtime `output/definitions`, `output/workloads`, or `output/blob`.",
         "Do not run Modal, collect, validate, or commit.",
         "",
         "After writing the proposal, run:",
         "",
         "```bash",
-        "python3 -B -m flashinfer_bench.onboarding.proposal_tools agent-loop \\",
+        "python3 -B -m flashinfer_bench.onboarding.proposal_tools check-proposal \\",
         f"  --proposal-dir {_display_path(proposal_dir)} \\",
         f"  --hf-config {_display_path(hf_config_path)} \\",
         f"  --flashinfer-root {_display_path(flashinfer_root)}",
         "```",
         "",
-        "If `agent_feedback.md` reports `FIX_REQUIRED`, revise only the review-only",
+        "If the `review_checklist.md` tool status reports `FIX_REQUIRED`, revise only the review-only",
         "proposal bundle and repeat the same deterministic check until it prints:",
         "",
         "```text",
@@ -148,7 +150,9 @@ def spawn_agents(
             cookbook_root=cookbook_root,
             sglang_model_hints=sglang_model_hints,
         )
-        prompt_path = proposal_dir / "first_pass_prompt.md"
+        artifacts_dir = proposal_dir / "agent_artifacts"
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        prompt_path = artifacts_dir / "first_pass_prompt.md"
         prompt_path.write_text(prompt_text, encoding="utf-8")
         item = {
             "index": index + 1,
@@ -161,10 +165,8 @@ def spawn_agents(
             print(f"[spawn-agents] prompt {index + 1}/{count}: {prompt_path}", flush=True)
 
         if agent_command:
-            stdout_path = proposal_dir / "agent_stdout.log"
-            stderr_path = proposal_dir / "agent_stderr.log"
-            stdout_file = stdout_path.open("w", encoding="utf-8")
-            stderr_file = stderr_path.open("w", encoding="utf-8")
+            stdout_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+            stderr_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
             proc = subprocess.Popen(
                 agent_command,
                 text=True,
@@ -176,7 +178,7 @@ def spawn_agents(
             if progress:
                 print(
                     f"[spawn-agents] started agent {index + 1}/{count}: "
-                    f"pid={proc.pid} stdout={stdout_path} stderr={stderr_path}",
+                    f"pid={proc.pid}",
                     flush=True,
                 )
             processes.append({
@@ -184,8 +186,6 @@ def spawn_agents(
                 "stdin": prompt_text,
                 "stdout_file": stdout_file,
                 "stderr_file": stderr_file,
-                "stdout_path": stdout_path,
-                "stderr_path": stderr_path,
                 "prompt": item,
             })
 
@@ -204,17 +204,32 @@ def spawn_agents(
             if returncode is None:
                 remaining.append(proc_info)
                 continue
-            proc_info["stdout_file"].close()
-            proc_info["stderr_file"].close()
             prompt = proc_info["prompt"]
             result = {
                 "run_dir": prompt["run_dir"],
                 "proposal_dir": prompt["proposal_dir"],
                 "returncode": returncode,
-                "stdout": str(proc_info["stdout_path"]),
-                "stderr": str(proc_info["stderr_path"]),
             }
             agent_results.append(result)
+            if returncode != 0:
+                proc_info["stdout_file"].seek(0)
+                proc_info["stderr_file"].seek(0)
+                stdout_text = proc_info["stdout_file"].read()
+                stderr_text = proc_info["stderr_file"].read()
+                if stdout_text.strip():
+                    print(
+                        f"[spawn-agents] agent {prompt['index']} stdout:\n{stdout_text}",
+                        file=sys.stdout,
+                        flush=True,
+                    )
+                if stderr_text.strip():
+                    print(
+                        f"[spawn-agents] agent {prompt['index']} stderr:\n{stderr_text}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            proc_info["stdout_file"].close()
+            proc_info["stderr_file"].close()
             if progress:
                 status = "ok" if returncode == 0 else "failed"
                 print(
@@ -257,9 +272,4 @@ def spawn_agents(
         "agent_results": agent_results,
         "merge_report": str(merge_output_dir / "merge_report.json") if merge_output_dir is not None else None,
     }
-    report_path = run_base.parent / f"{run_base.name}_spawn_agents.json"
-    _write_json(report_path, result)
-    result["report"] = str(report_path)
-    if progress:
-        print(f"[spawn-agents] report: {report_path}", flush=True)
     return result

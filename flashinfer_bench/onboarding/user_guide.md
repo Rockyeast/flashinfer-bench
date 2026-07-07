@@ -59,12 +59,13 @@ python3 -B -m flashinfer_bench.onboarding.proposal_tools spawn-agents \
 
 `spawn-agents` writes each agent's prompt/run under `runs/<model>/<date>_firstpass...`. With `--count > 1`, it creates sibling agent runs and merges proposals into a review-only merged proposal.
 
-The agent follows `.claude/skills/review-onboarding-proposal/SKILL.md` and writes:
+This stage may leave these files. `spawn-agents` writes the prompt file; when an external agent command fails, its stdout/stderr are printed to the current terminal instead of being stored under `proposal/`.
 
 ```text
 runs/<model>/<run_id>/
   proposal/
     architecture.md
+    first_pass_prompt.md
     candidate_targets.json
     review_checklist.md
     definitions/
@@ -73,7 +74,7 @@ runs/<model>/<run_id>/
     run_config.json
 ```
 
-The agent is expected to run `agent-loop` until the proposal is ready for human review.
+The agent is expected to run `check-proposal` until the proposal is ready for human review.
 
 ### 3. Review And Approve
 
@@ -104,7 +105,7 @@ Minimum approval checklist:
 - Known collectable non-FI ops, currently `rmsnorm` and `silu_and_mul`, have review-only definition/hints drafts before approval.
 - Non-FI drafts are promoted from `proposal/definitions/` and `proposal/definition_hints/` into `config/definitions/` and `config/definition_hints/`.
 
-Proposal tools do not approve anything. `check-proposal`, `agent-loop`, and `repair-loop` only validate or repair proposal artifacts.
+Proposal tools do not approve anything. `check-proposal` and `repair-loop` only validate or repair proposal artifacts.
 
 ### 4. Run Collect
 
@@ -139,7 +140,7 @@ python3 -B -m flashinfer_bench.onboarding.cli validate \
   --run <model>/<run_id>
 ```
 
-`validate` is the final acceptance command. It runs local consistency checks, official-style layout/export checks, and upstream `flashinfer-bench validate` with GPU disabled. The run is accepted only when it prints:
+`validate` is the final acceptance command. It runs local consistency checks, validator layout/export checks, and `flashinfer-bench validate` with GPU disabled. The run is accepted only when it prints:
 
 ```text
 run accepted: True
@@ -154,7 +155,7 @@ runs/<model>/<run_id>/reports/run_report.json
 
 ### 6. Repair If Needed
 
-Do not edit `output/` directly. Use `repair-loop` to generate feedback and optionally invoke an external agent:
+Do not edit `output/` directly. Use `repair-loop` to update the proposal checklist status and optionally invoke an external agent:
 
 ```bash
 python3 -B -m flashinfer_bench.onboarding.proposal_tools repair-loop \
@@ -194,14 +195,13 @@ runs/<model>/<run_id>/
     architecture.md
     candidate_targets.json
     review_checklist.md
+    merge_review.md
+    merge_report.json
+    agent_artifacts/
+      first_pass_prompt.md
+      repair_prompt.md
     definitions/
     definition_hints/
-    proposal_check.json
-    agent_feedback.md
-    agent_loop.json
-    repair_prompt.md
-    repair_loop.json
-    run_diagnostics.json
   config/
     approved_targets.json
     run_config.json
@@ -218,7 +218,7 @@ runs/<model>/<run_id>/
 
 - `proposal/` is review-only agent output.
 - `config/` is human-reviewed input consumed by runtime.
-- `output/` is official-style staging data produced by the run.
+- `output/` is validator-ready staging data produced by the run.
 - `reports/` contains the machine-readable run report and human review digest.
 
 ### Run Config
@@ -311,7 +311,7 @@ Captures are raw argument snapshots created when hooks fire. They are intermedia
 
 Normal collect stops early when a target fails audit/sanitize. Later targets may show zero events because they were not executed. That does not mean those targets are invalid, and they should not be changed to `collect: false` just because of early stop.
 
-`repair-loop` detects early-stop cases and includes the reason in proposal feedback.
+`repair-loop` detects early-stop cases and includes the reason in the proposal checklist status.
 
 To gather more diagnostics in one run:
 

@@ -1,9 +1,4 @@
-"""CLI entry point for offline proposal onboarding tools.
-
-The implementation is split under ``flashinfer_bench.onboarding.proposal``;
-this module preserves the public ``python -m ...proposal_tools`` command and
-legacy function imports.
-"""
+"""CLI entry point for offline proposal onboarding tools."""
 
 from __future__ import annotations
 
@@ -20,29 +15,14 @@ from flashinfer_bench.onboarding.proposal.common import (
     _default_hf_config_path,
     _default_merge_output_dir,
     _default_run_prefix,
-    _write_json,
 )
-from flashinfer_bench.onboarding.proposal.checks.fitrace import _sglang_config_compat_engine_kwargs
-from flashinfer_bench.onboarding.proposal.gate import check_proposal, run_agent_loop
+from flashinfer_bench.onboarding.proposal.gate import run_proposal_gate
 from flashinfer_bench.onboarding.proposal.workflow.diagnose import diagnose_run
 from flashinfer_bench.onboarding.proposal.workflow.merge import merge_proposals
-from flashinfer_bench.onboarding.proposal.workflow.prepare import prepare_agent_inputs, slug_model_name
+from flashinfer_bench.onboarding.proposal.workflow.prepare import prepare_agent_inputs
 from flashinfer_bench.onboarding.proposal.workflow.repair import repair_loop
-from flashinfer_bench.onboarding.proposal.workflow.spawn import first_pass_prompt_markdown, spawn_agents
+from flashinfer_bench.onboarding.proposal.workflow.spawn import spawn_agents
 
-__all__ = [
-    "check_proposal",
-    "diagnose_run",
-    "first_pass_prompt_markdown",
-    "main",
-    "merge_proposals",
-    "prepare_agent_inputs",
-    "repair_loop",
-    "run_agent_loop",
-    "_sglang_config_compat_engine_kwargs",
-    "slug_model_name",
-    "spawn_agents",
-]
 
 def _add_prepare_agent_inputs_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
@@ -57,36 +37,6 @@ def _add_prepare_agent_inputs_parser(subparsers: argparse._SubParsersAction) -> 
     parser.add_argument("--check-flashinfer-root", type=Path, default=Path("agent_inputs/flashinfer/flashinfer"))
 
 
-def _add_check_parser(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser(
-        "check",
-        help="Check candidate fields and FlashInfer fitrace collect targets in one gate.",
-    )
-    parser.add_argument("--candidates", type=Path, required=True)
-    parser.add_argument("--hf-config", type=Path, required=True)
-    parser.add_argument(
-        "--flashinfer-root",
-        type=Path,
-        help="Path to flashinfer/ source root for static fitrace checks. Defaults to agent_inputs/flashinfer/flashinfer when present.",
-    )
-    parser.add_argument("--output", type=Path)
-
-
-def _add_agent_loop_parser(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser(
-        "agent-loop",
-        help="Run one proposal check loop and write feedback for the external agent.",
-    )
-    parser.add_argument("--proposal-dir", type=Path, required=True)
-    parser.add_argument("--hf-config", type=Path, required=True)
-    parser.add_argument("--candidates", type=Path)
-    parser.add_argument(
-        "--flashinfer-root",
-        type=Path,
-        help="Path to flashinfer/ source root for static fitrace checks.",
-    )
-
-
 def _add_check_proposal_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         "check-proposal",
@@ -94,7 +44,6 @@ def _add_check_proposal_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     parser.add_argument("--proposal-dir", type=Path, required=True)
     parser.add_argument("--hf-config", type=Path, required=True)
-    parser.add_argument("--candidates", type=Path)
     parser.add_argument(
         "--flashinfer-root",
         type=Path,
@@ -105,7 +54,7 @@ def _add_check_proposal_parser(subparsers: argparse._SubParsersAction) -> None:
 def _add_diagnose_run_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         "diagnose-run",
-        help="Convert reports/run_report.json into proposal/agent_feedback.md for the next agent pass.",
+        help="Convert reports/run_report.json into the proposal/review_checklist.md tool status block.",
     )
     parser.add_argument("--run", type=Path, required=True, help="Run path or path relative to runs/.")
 
@@ -202,8 +151,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Offline proposal onboarding tools")
     subparsers = parser.add_subparsers(dest="command", required=True)
     _add_prepare_agent_inputs_parser(subparsers)
-    _add_check_parser(subparsers)
-    _add_agent_loop_parser(subparsers)
     _add_check_proposal_parser(subparsers)
     _add_diagnose_run_parser(subparsers)
     _add_repair_loop_parser(subparsers)
@@ -224,58 +171,17 @@ def main(argv: list[str] | None = None) -> int:
             check_sglang_root=args.check_sglang_root,
             check_flashinfer_root=args.check_flashinfer_root,
         )
-        report_path = args.output_root / "prepare_report.json"
-        _write_json(report_path, report)
         summary = report["summary"]
         print(f"models: {summary['models']}")
         print(f"configs ok: {summary['configs_ok']}")
         print(f"cookbook ok: {summary['cookbook_ok']}")
         print(f"cookbook matches: {summary['cookbook_matches']}")
         print(f"source checks ok: {summary['source_checks_ok']}")
-        print(f"report: {report_path}")
         return 0
 
-    if args.command == "check":
-        proposal_dir = args.candidates.parent
-        report = check_proposal(
-            proposal_dir=proposal_dir,
-            candidates_path=args.candidates,
-            hf_config_path=args.hf_config,
-            flashinfer_root=args.flashinfer_root,
-        )
-        if args.output:
-            _write_json(args.output, report)
-        summary = report["summary"]
-        print(f"entries: {summary['entries']}")
-        print(f"collect candidates: {summary['collect_candidates']}")
-        print(f"importable targets: {summary['importable_targets']}")
-        print(f"fitrace targets: {summary['fitrace_targets']}")
-        print(f"definition draft targets: {summary['definition_draft_targets']}")
-        print(f"errors: {summary['errors']}")
-        print(f"warnings: {summary['warnings']}")
-        if args.output:
-            print(f"report: {args.output}")
-        return 0 if summary["ok"] else 1
-
-    if args.command == "agent-loop":
-        result = run_agent_loop(
-            proposal_dir=args.proposal_dir,
-            candidates_path=args.candidates,
-            hf_config_path=args.hf_config,
-            flashinfer_root=args.flashinfer_root,
-        )
-        summary = result["summary"]
-        print(f"ready for human review: {summary['ready_for_human_review']}")
-        print(f"errors: {summary['errors']}")
-        print(f"warnings: {summary['warnings']}")
-        print(f"feedback: {result['outputs']['feedback']}")
-        print(f"report: {result['outputs']['loop_report']}")
-        return 0 if summary["ok"] else 1
-
     if args.command == "check-proposal":
-        result = run_agent_loop(
+        result = run_proposal_gate(
             proposal_dir=args.proposal_dir,
-            candidates_path=args.candidates,
             hf_config_path=args.hf_config,
             flashinfer_root=args.flashinfer_root,
         )
@@ -284,8 +190,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ready for human review: {summary['ready_for_human_review']}")
         print(f"errors: {summary['errors']}")
         print(f"warnings: {summary['warnings']}")
-        print(f"feedback: {result['outputs']['feedback']}")
-        print(f"report: {result['outputs']['loop_report']}")
+        print(f"review checklist: {result['outputs']['review_checklist']}")
         return 0 if summary["ok"] else 1
 
     if args.command == "diagnose-run":
@@ -295,8 +200,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"errors: {summary['errors']}")
         print(f"warnings: {summary['warnings']}")
         print(f"action_required: {summary.get('action_required', 0)}")
-        print(f"feedback: {result['outputs']['feedback']}")
-        print(f"report: {result['outputs']['diagnostics']}")
+        print(f"review checklist: {result['outputs']['review_checklist']}")
         return 0 if summary["ok"] else 1
 
     if args.command == "repair-loop":
@@ -316,8 +220,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"rounds: {summary['rounds']}/{summary['max_rounds']}")
         print(f"agent ran: {summary['agent_ran']}")
         print(f"repair prompt: {result['outputs']['repair_prompt']}")
-        print(f"feedback: {result['outputs']['feedback']}")
-        print(f"report: {result['outputs']['agent_loop']}")
+        print(f"review checklist: {result['outputs']['review_checklist']}")
         return 0 if summary["ready_for_human_review"] else 1
 
     if args.command == "spawn-agents":

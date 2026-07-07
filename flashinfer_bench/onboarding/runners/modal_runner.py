@@ -683,7 +683,6 @@ def run_remote_probe_entrypoint(
     )
     collect_dir = stage["collect_dir"]
     audited_definitions_dir = stage["audited_definitions_dir"]
-    definition_hints_dir = stage["definition_hints_dir"]
     definition_audit_report = stage["definition_audit_report"]
     collect_plan_payload = stage["collect_plan"]
     manifest = stage["workload_manifest"]
@@ -706,15 +705,8 @@ def run_remote_probe_entrypoint(
         arcname="definitions",
         label="definitions",
     )
-    result["definition_hints_archive_b64"] = _read_dir_archive_b64(
-        definition_hints_dir,
-        archive_name="definition_hints.tar.gz",
-        arcname="definition_hints",
-        label="definition hints",
-    )
     result["summary"]["fitrace_definitions"] = _count_files(fitrace_definitions_dir)
     result["summary"]["audited_definitions"] = _count_files(audited_definitions_dir)
-    result["summary"]["definition_hints"] = _count_files(definition_hints_dir)
     result["summary"]["definition_audit_repaired"] = definition_audit_report.get("summary", {}).get("repaired", 0)
     result["summary"]["definition_audit_rejected"] = definition_audit_report.get("summary", {}).get("rejected", 0)
     result["summary"]["workloads"] = manifest.get("summary", {}).get("workloads", 0)
@@ -816,7 +808,6 @@ def materialize_modal_result(result: dict[str, Any], output_dir: Path) -> None:
     output_root = run_dir / "output"
     definitions_dir = output_root / "definitions"
     _materialize_definition_outputs(definitions_dir, result)
-    _materialize_definition_hints_outputs(output_root / "definition_hints", result)
     _materialize_collect_outputs(
         result,
         collect_dir=output_dir / "collect",
@@ -835,7 +826,6 @@ def _redact_modal_result(result: dict[str, Any]) -> dict[str, Any]:
     for key in (
         "collect_archive_b64",
         "definitions_archive_b64",
-        "definition_hints_archive_b64",
     ):
         value = redacted.get(key)
         if isinstance(value, str):
@@ -1004,12 +994,6 @@ def _materialize_definition_outputs(root: Path, result: dict[str, Any]) -> None:
     archive_b64 = result.get("definitions_archive_b64")
     if isinstance(archive_b64, str) and archive_b64:
         _write_named_archive(root=root, archive_b64=archive_b64, expected_root="definitions")
-
-
-def _materialize_definition_hints_outputs(root: Path, result: dict[str, Any]) -> None:
-    archive_b64 = result.get("definition_hints_archive_b64")
-    if isinstance(archive_b64, str) and archive_b64:
-        _write_named_archive(root=root, archive_b64=archive_b64, expected_root="definition_hints")
 
 
 def rewrite_collect_output_paths(

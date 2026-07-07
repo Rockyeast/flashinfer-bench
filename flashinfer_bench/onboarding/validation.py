@@ -1,7 +1,7 @@
 """Validation and review reporting for one trace run.
 
 Covers both the lightweight local consistency checks and the wrapper around
-upstream flashinfer-bench dataset validation.
+flashinfer-bench dataset validation.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -100,7 +101,7 @@ def update_run_report(run_dir: Path, **sections: Any) -> dict[str, Any]:
             report[key] = value
 
     internal = report.get("internal_validation") if isinstance(report.get("internal_validation"), dict) else {}
-    official = report.get("official_validation") if isinstance(report.get("official_validation"), dict) else {}
+    dataset_validation = report.get("dataset_validation") if isinstance(report.get("dataset_validation"), dict) else {}
     export = report.get("export") if isinstance(report.get("export"), dict) else {}
     collect = report.get("collect") if isinstance(report.get("collect"), dict) else {}
     audit = report.get("definition_audit") if isinstance(report.get("definition_audit"), dict) else {}
@@ -125,16 +126,16 @@ def update_run_report(run_dir: Path, **sections: Any) -> dict[str, Any]:
         report.pop("diagnostics", None)
 
     internal_ok = internal_summary.get("ok")
-    official_ok = official.get("ok")
+    dataset_ok = dataset_validation.get("ok")
     export_ok = export_summary.get("ok")
-    accepted = bool(internal_ok) and (official_ok is not False) and (export_ok is not False)
-    if official_ok is None:
+    accepted = bool(internal_ok) and (dataset_ok is not False) and (export_ok is not False)
+    if dataset_ok is None:
         accepted = False
 
     report["summary"] = {
         "accepted": accepted,
         "internal_ok": internal_ok,
-        "official_ok": official_ok,
+        "dataset_ok": dataset_ok,
         "export_ok": export_ok,
         "errors": internal_summary.get("errors", 0),
         "warnings": internal_summary.get("warnings", 0),
@@ -157,7 +158,7 @@ def render_run_review_markdown(report: dict[str, Any]) -> str:
     """Render the human-facing review view from ``run_report.json``."""
     summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
     internal = report.get("internal_validation") if isinstance(report.get("internal_validation"), dict) else {}
-    official = report.get("official_validation") if isinstance(report.get("official_validation"), dict) else {}
+    dataset_validation = report.get("dataset_validation") if isinstance(report.get("dataset_validation"), dict) else {}
     collect = report.get("collect") if isinstance(report.get("collect"), dict) else {}
     audit = report.get("definition_audit") if isinstance(report.get("definition_audit"), dict) else {}
     export = report.get("export") if isinstance(report.get("export"), dict) else {}
@@ -179,7 +180,7 @@ def render_run_review_markdown(report: dict[str, Any]) -> str:
         "",
         f"- accepted: {summary.get('accepted')}",
         f"- internal validation: {summary.get('internal_ok')}",
-        f"- official validation: {summary.get('official_ok')}",
+        f"- dataset validation: {summary.get('dataset_ok')}",
         f"- export: {summary.get('export_ok')}",
         f"- early stopped: {summary.get('early_stopped')}",
         "",
@@ -275,10 +276,10 @@ def render_run_review_markdown(report: dict[str, Any]) -> str:
                 )
     lines.extend([
         "",
-        "## Official Validation",
+        "## Dataset Validation",
         "",
-        f"- ok: {official.get('ok')}",
-        f"- returncode: {official.get('returncode')}",
+        f"- ok: {dataset_validation.get('ok')}",
+        f"- returncode: {dataset_validation.get('returncode')}",
         "",
     ])
     return "\n".join(lines)
@@ -290,9 +291,9 @@ def export_run_dataset(
     output_dir: Path | None = None,
     overwrite: bool = False,
 ) -> dict[str, Any]:
-    """Prepare an official-style dataset root from one reviewed run.
+    """Prepare a validator dataset root from one reviewed run.
 
-    By default the run root's ``output`` directory is the official-style staging root:
+    By default the run root's ``output`` directory is the validator dataset root:
     ``definitions/``, ``workloads/``, and ``blob/`` live directly under that
     directory. Passing a different ``output_dir`` copies those files out for
     promotion or ad-hoc validation.
@@ -550,11 +551,11 @@ def validate_run(
 
 
 # ---------------------------------------------------------------------------
-# Upstream flashinfer-bench dataset validation
+# FlashInfer-Bench dataset validation
 # ---------------------------------------------------------------------------
 
 
-def _build_official_validate_command(
+def _build_dataset_validate_command(
     *,
     dataset_dir: Path,
     checks: str,
@@ -581,65 +582,60 @@ def _build_official_validate_command(
     return command
 
 
-def run_official_validate(
+def run_dataset_validator(
     *,
     dataset_dir: Path,
-    output_dir: Path,
     checks: str = "layout,definition,workload",
-    outputs: str = "stdout,json,text",
-    output_folder: Path | None = None,
+    outputs: str = "stdout",
     disable_gpu: bool = True,
 ) -> dict[str, Any]:
-    """Run flashinfer-bench validation and return a machine-readable report."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    cache_root = output_dir / "official_validate_cache"
-    cache_root.mkdir(parents=True, exist_ok=True)
-    effective_output_folder = output_folder or (output_dir / "official_validate_outputs")
+    """Run the flashinfer-bench dataset validator and return a report."""
+    try:
+        import flashinfer_bench  # noqa: F401
+    except ImportError as exc:
+        return {
+            "command": [],
+            "dataset_dir": str(dataset_dir),
+            "checks": checks,
+            "outputs": outputs,
+            "disable_gpu": disable_gpu,
+            "returncode": 1,
+            "ok": False,
+            "error": "flashinfer-bench is not installed",
+            "detail": str(exc),
+        }
 
-    command = _build_official_validate_command(
-        dataset_dir=dataset_dir,
-        checks=checks,
-        outputs=outputs,
-        output_folder=effective_output_folder,
-        disable_gpu=disable_gpu,
+    with tempfile.TemporaryDirectory(prefix="flashinfer-bench-dataset-validate-") as tmp:
+        tmp_dir = Path(tmp)
+        cache_root = tmp_dir / "cache"
+        cache_root.mkdir(parents=True, exist_ok=True)
+        command = _build_dataset_validate_command(
+            dataset_dir=dataset_dir,
+            checks=checks,
+            outputs=outputs,
+            output_folder=None,
+            disable_gpu=disable_gpu,
+        )
+        env = os.environ.copy()
+        env["XDG_CACHE_HOME"] = str(cache_root)
+        env["FLASHINFER_WORKSPACE_BASE"] = str(cache_root)
+        result = subprocess.run(command, env=env, text=True, capture_output=True, check=False)
+    output_text = f"{result.stdout}\n{result.stderr}".lower()
+    output_has_errors = bool(re.search(r"\b[1-9]\d*\s+error\b", output_text)) or any(
+        marker in output_text
+        for marker in ("[error]", "parse error", "validation error", "cannot validate workloads")
     )
     report: dict[str, Any] = {
         "command": command,
         "dataset_dir": str(dataset_dir),
         "checks": checks,
         "outputs": outputs,
-        "output_folder": str(effective_output_folder),
         "disable_gpu": disable_gpu,
-    }
-
-    try:
-        import flashinfer_bench  # noqa: F401
-    except ImportError as exc:
-        report.update({
-            "returncode": 1,
-            "ok": False,
-            "error": "flashinfer-bench is not installed",
-            "detail": str(exc),
-        })
-        return report
-
-    env = os.environ.copy()
-    env["XDG_CACHE_HOME"] = str(cache_root)
-    env["FLASHINFER_WORKSPACE_BASE"] = str(cache_root)
-    result = subprocess.run(command, env=env, text=True, capture_output=True, check=False)
-    output_text = f"{result.stdout}\n{result.stderr}".lower()
-    output_has_errors = bool(re.search(r"\b[1-9]\d*\s+error\b", output_text)) or any(
-        marker in output_text
-        for marker in ("[error]", "parse error", "validation error", "cannot validate workloads")
-    )
-    report.update({
         "returncode": result.returncode,
         "ok": result.returncode == 0 and not output_has_errors,
         "stdout": result.stdout,
         "stderr": result.stderr,
-    })
+    }
     if output_has_errors:
-        report["error"] = "official validator output contains errors"
-    (output_dir / "official_validate.stdout.txt").write_text(result.stdout, encoding="utf-8")
-    (output_dir / "official_validate.stderr.txt").write_text(result.stderr, encoding="utf-8")
+        report["error"] = "dataset validator output contains errors"
     return report

@@ -55,6 +55,11 @@ workload_dumps_*
 flashinfer_dumps
 sglang_*.jsonl
 
+# Local onboarding visualization drafts/generated HTML
+docs/viz_src/
+flashinfer_bench_map.html
+flashinfer_bench_onboarding_map.html
+
 # Agent/worktree runtime files
 .agent-progress.md
 .agent.log

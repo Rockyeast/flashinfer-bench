@@ -104,19 +104,12 @@ def test_materialize_modal_result_extracts_remote_collect_and_redacts_archives(t
     definitions_archive_path = source_root / "definitions.tar.gz"
     with tarfile.open(definitions_archive_path, "w:gz") as archive:
         archive.add(source_root / "definitions", arcname="definitions")
-    hints_dir = source_root / "definition_hints" / "gqa_paged"
-    hints_dir.mkdir(parents=True)
-    (hints_dir / "demo.json").write_text(json.dumps(_gqa_paged_hints("demo")) + "\n", encoding="utf-8")
-    hints_archive_path = source_root / "definition_hints.tar.gz"
-    with tarfile.open(hints_archive_path, "w:gz") as archive:
-        archive.add(source_root / "definition_hints", arcname="definition_hints")
     output_dir = tmp_path / "run" / ".modal_tmp"
     materialize_modal_result(
         {
             "parse_report": {"summary": {"events": 1, "missing_targets": 0}},
             "collect_archive_b64": base64.b64encode(archive_path.read_bytes()).decode("ascii"),
             "definitions_archive_b64": base64.b64encode(definitions_archive_path.read_bytes()).decode("ascii"),
-            "definition_hints_archive_b64": base64.b64encode(hints_archive_path.read_bytes()).decode("ascii"),
             "definition_audit_report": {"summary": {"raw": 1, "passed": 1, "repaired": 0, "rejected": 0}},
             "summary": {"workloads": 1, "sanitized": 1},
         },
@@ -151,16 +144,13 @@ def test_materialize_modal_result_extracts_remote_collect_and_redacts_archives(t
         tmp_path / "run" / "output" / "definitions" / "gqa_paged" / "demo.json"
     )
     assert (tmp_path / "run" / "output" / "definitions" / "gqa_paged" / "demo.json").exists()
-    assert (tmp_path / "run" / "output" / "definition_hints" / "gqa_paged" / "demo.json").exists()
     assert (tmp_path / "run" / "output" / "workloads" / "gqa_paged" / "demo.jsonl").exists()
     assert not (output_dir / "captures").exists()
 
     assert result["collect_archive_b64"]["redacted"] is True
     assert result["definitions_archive_b64"]["redacted"] is True
-    assert result["definition_hints_archive_b64"]["redacted"] is True
     assert not (tmp_path / "run" / "collect.tar.gz").exists()
     assert not (tmp_path / "run" / "definitions.tar.gz").exists()
-    assert not (tmp_path / "run" / "definition_hints.tar.gz").exists()
 
 def test_run_collect_run_requires_remote_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from flashinfer_bench.onboarding import cli
@@ -246,4 +236,3 @@ def test_run_diagnostic_full_scan_sets_modal_plan_flag(tmp_path: Path, monkeypat
 
     with pytest.raises(RuntimeError, match="stop after plan assertion"):
         cli.main(["run", "--run", "demo", "--diagnostic-full-scan"])
-

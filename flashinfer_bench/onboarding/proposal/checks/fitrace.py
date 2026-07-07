@@ -247,7 +247,7 @@ def _expected_fitrace_preview(hf_config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _sglang_config_compat_engine_kwargs(hf_config: dict[str, Any]) -> dict[str, str]:
+def _required_sglang_engine_kwargs(hf_config: dict[str, Any]) -> dict[str, str]:
     """Return reviewed Engine kwargs needed before SGLang can load this config."""
     rope_scaling = hf_config.get("rope_scaling")
     if (
@@ -279,14 +279,14 @@ def _check_run_config(
     """Check proposal-time run_config requirements that prevent known startup failures."""
     findings: list[dict[str, str]] = []
     path = proposal_dir.parent / "config" / "run_config.json"
-    required_engine_kwargs = _sglang_config_compat_engine_kwargs(hf_config)
+    required_engine_kwargs = _required_sglang_engine_kwargs(hf_config)
     if not path.exists():
         if required_engine_kwargs:
             findings.append({
                 "severity": "error",
                 "name": "run_config",
                 "reason": (
-                    "missing proposed runtime config required for model startup compatibility; "
+                    "missing proposed runtime config required for model startup; "
                     f"run_config.engine_kwargs must include {sorted(required_engine_kwargs)}: {path}"
                 ),
             })

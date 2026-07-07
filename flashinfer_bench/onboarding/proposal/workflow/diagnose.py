@@ -1,4 +1,4 @@
-"""Convert completed run reports into proposal feedback."""
+"""Convert completed run reports into proposal checklist status."""
 
 from __future__ import annotations
 
@@ -115,12 +115,10 @@ def _uncollected_definition_findings(
 
 
 def diagnose_run(*, run: Path) -> dict[str, Any]:
-    """Convert a completed run report into agent-readable proposal feedback."""
+    """Convert a completed run report into the review checklist tool status."""
     run_dir = _resolve_run_dir(run)
     proposal_dir = run_dir / "proposal"
     report_path = run_dir / "reports" / "run_report.json"
-    diagnostics_path = proposal_dir / "run_diagnostics.json"
-    feedback_path = proposal_dir / "agent_feedback.md"
     proposal_dir.mkdir(parents=True, exist_ok=True)
 
     findings: list[dict[str, Any]] = []
@@ -240,15 +238,15 @@ def diagnose_run(*, run: Path) -> dict[str, Any]:
         items=internal_findings,
     )
 
-    official = report.get("official_validation") if isinstance(report.get("official_validation"), dict) else {}
-    if official and not official.get("ok", False):
-        stdout = official.get("stdout")
-        stderr = official.get("stderr")
-        reason = _brief(stdout or stderr or f"returncode={official.get('returncode')}", limit=1200)
+    dataset_validation = report.get("dataset_validation") if isinstance(report.get("dataset_validation"), dict) else {}
+    if dataset_validation and not dataset_validation.get("ok", False):
+        stdout = dataset_validation.get("stdout")
+        stderr = dataset_validation.get("stderr")
+        reason = _brief(stdout or stderr or f"returncode={dataset_validation.get('returncode')}", limit=1200)
         findings.append({
-            "source": "official_validation",
+            "source": "dataset_validation",
             "severity": "error",
-            "name": "upstream_validator",
+            "name": "dataset_validator",
             "reason": reason,
         })
 
@@ -271,23 +269,22 @@ def diagnose_run(*, run: Path) -> dict[str, Any]:
         diagnostics["ignored_uncollected_definitions"] = ignored_uncollected
     if proposed_uncollected:
         diagnostics["proposed_uncollected_definitions"] = proposed_uncollected
-    _write_json(diagnostics_path, diagnostics)
-    feedback_path.write_text(_run_diagnostics_feedback_markdown(diagnostics), encoding="utf-8")
+    review_path = _write_review_tool_status(proposal_dir, _run_diagnostics_tool_status_markdown(diagnostics))
     return {
         "summary": diagnostics["summary"],
         "run_dir": str(run_dir),
+        "diagnostics": diagnostics,
         "outputs": {
-            "diagnostics": str(diagnostics_path),
-            "feedback": str(feedback_path),
+            "review_checklist": str(review_path),
         },
     }
 
 
-def _run_diagnostics_feedback_markdown(diagnostics: dict[str, Any]) -> str:
+def _run_diagnostics_tool_status_markdown(diagnostics: dict[str, Any]) -> str:
     summary = diagnostics["summary"]
     status = "PASS" if summary["ok"] else "FIX_REQUIRED"
     lines = [
-        "# Agent Proposal Feedback",
+        "## Tool Status",
         "",
         f"- status: {status}",
         f"- source: run diagnostics",
@@ -340,5 +337,3 @@ def _run_diagnostics_feedback_markdown(diagnostics: dict[str, Any]) -> str:
         )
     lines.append("")
     return "\n".join(lines)
-
-
