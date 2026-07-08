@@ -530,7 +530,6 @@ def _build_remote_post_capture_outputs(
         "collect_dir": collect_dir,
         "audited_definitions_dir": audited_definitions_dir,
         "definition_hints_dir": definition_hints_dir,
-        "generated_definition_hints_dir": generated_definition_hints_dir,
         "definition_audit_report": definition_audit_report,
         "collect_plan": collect_plan_payload,
         "workload_manifest": manifest,
@@ -687,7 +686,6 @@ def run_remote_probe_entrypoint(
     )
     collect_dir = stage["collect_dir"]
     audited_definitions_dir = stage["audited_definitions_dir"]
-    generated_definition_hints_dir = stage["generated_definition_hints_dir"]
     definition_audit_report = stage["definition_audit_report"]
     collect_plan_payload = stage["collect_plan"]
     manifest = stage["workload_manifest"]
@@ -709,12 +707,6 @@ def run_remote_probe_entrypoint(
         archive_name="definitions.tar.gz",
         arcname="definitions",
         label="definitions",
-    )
-    result["definition_hints_archive_b64"] = _read_dir_archive_b64(
-        generated_definition_hints_dir,
-        archive_name="generated_definition_hints.tar.gz",
-        arcname="generated_definition_hints",
-        label="generated definition hints",
     )
     result["summary"]["fitrace_definitions"] = _count_files(fitrace_definitions_dir)
     result["summary"]["audited_definitions"] = _count_files(audited_definitions_dir)

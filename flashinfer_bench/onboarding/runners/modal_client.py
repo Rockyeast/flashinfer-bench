@@ -147,10 +147,10 @@ def materialize_modal_result(result: dict[str, Any], output_dir: Path) -> None:
     output_root = run_dir / "output"
     reports_dir = run_dir / "reports"
     definitions_dir = output_root / "definitions"
-    generated_hints_dir = reports_dir / "generated_definition_hints"
+    shutil.rmtree(reports_dir / "generated_definition_hints", ignore_errors=True)
+    (reports_dir / "generated_definition_hints.tar.gz").unlink(missing_ok=True)
     _materialize_definition_outputs(definitions_dir, result)
-    _materialize_generated_definition_hints(generated_hints_dir, result)
-    _annotate_generated_definition_hints(result, generated_hints_dir)
+    _summarize_generated_definition_hints(result)
     _materialize_collect_outputs(
         result,
         collect_dir=output_dir / "collect",
@@ -169,7 +169,6 @@ def _redact_modal_result(result: dict[str, Any]) -> dict[str, Any]:
     for key in (
         "collect_archive_b64",
         "definitions_archive_b64",
-        "definition_hints_archive_b64",
     ):
         value = redacted.get(key)
         if isinstance(value, str):
@@ -240,57 +239,20 @@ def _materialize_definition_outputs(root: Path, result: dict[str, Any]) -> None:
         _write_named_archive(root=root, archive_b64=archive_b64, expected_root="definitions")
 
 
-def _materialize_generated_definition_hints(root: Path, result: dict[str, Any]) -> None:
-    # Generated hints are a run artifact, not reviewed config. Clear stale hints
-    # first so a new run cannot accidentally look successful because of leftovers.
-    shutil.rmtree(root, ignore_errors=True)
-    archive_b64 = result.get("definition_hints_archive_b64")
-    if isinstance(archive_b64, str) and archive_b64:
-        _write_named_archive(
-            root=root,
-            archive_b64=archive_b64,
-            expected_root="generated_definition_hints",
-        )
-
-
-def _annotate_generated_definition_hints(result: dict[str, Any], root: Path) -> None:
+def _summarize_generated_definition_hints(result: dict[str, Any]) -> None:
     report = result.get("definition_audit_report")
     if not isinstance(report, dict):
         return
 
-    remote_hints_prefix = f"{DEFAULT_REMOTE_OUTPUT_DIR}/generated_definition_hints/"
-    run_dir = root.parent.parent
-
-    def display_path(path: Path) -> str:
-        try:
-            return str(path.relative_to(run_dir))
-        except ValueError:
-            return str(path)
-
-    def rewrite_hint_paths(value: Any) -> Any:
-        if isinstance(value, str) and value.startswith(remote_hints_prefix):
-            return display_path(root / value.removeprefix(remote_hints_prefix))
-        if isinstance(value, list):
-            return [rewrite_hint_paths(item) for item in value]
-        if isinstance(value, dict):
-            return {key: rewrite_hint_paths(item) for key, item in value.items()}
-        return value
-
-    report = rewrite_hint_paths(report)
-    if not isinstance(report, dict):
-        return
-    result["definition_audit_report"] = report
-
-    summary = report.get("summary")
-    hints_count = 0
-    if isinstance(summary, dict):
-        raw_count = summary.get("hints", 0)
-        hints_count = raw_count if isinstance(raw_count, int) else 0
-    report["generated_definition_hints"] = {
-        "count": hints_count,
-        "path": display_path(root),
-        "materialized": root.exists(),
-    }
+    for section in ("passed", "repaired"):
+        items = report.get(section)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.pop("hints_path", None):
+                item["hints_generated"] = True
 
 
 def rewrite_collect_output_paths(
