@@ -7,7 +7,7 @@ from pathlib import Path
 import shutil
 import tempfile
 
-from flashinfer_bench.onboarding.core.planning import load_approved_targets
+from flashinfer_bench.onboarding.core.probe_planning import load_approved_targets
 from flashinfer_bench.onboarding.core.schemas import ApprovedTarget
 
 from ..common import *  # noqa: F403

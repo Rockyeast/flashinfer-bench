@@ -53,10 +53,16 @@ Workflow:
    python3 -B -m flashinfer_bench.onboarding.cli validate --run <model>/<run_id>
    ```
 
-6. If the run exposes proposal-level issues, generate repair feedback:
+6. If static proposal checks fail before runtime, generate check repair input:
 
    ```bash
-   python3 -B -m flashinfer_bench.onboarding.proposal_tools repair-loop --run <model>/<run_id>
+   python3 -B -m flashinfer_bench.onboarding.proposal_tools check-repair-loop --proposal-dir runs/<model>/<run_id>/proposal --hf-config agent_inputs/config/<model_slug>.json
+   ```
+
+7. If the run exposes proposal-level issues, generate run repair input:
+
+   ```bash
+   python3 -B -m flashinfer_bench.onboarding.proposal_tools run-repair-loop --run <model>/<run_id>
    ```
 
 See `user_guide.md` for the full command reference, run directory layout, and troubleshooting notes.

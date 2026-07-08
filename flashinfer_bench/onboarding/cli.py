@@ -9,8 +9,8 @@ import re
 import shutil
 from pathlib import Path
 
-from flashinfer_bench.onboarding.runners.modal_runner import run_modal_probe
-from flashinfer_bench.onboarding.core.planning import (
+from flashinfer_bench.onboarding.runners.modal_client import run_modal_probe
+from flashinfer_bench.onboarding.core.probe_planning import (
     build_modal_probe_plan,
     build_probe_plan,
     load_approved_targets,

@@ -6,6 +6,21 @@ This document covers the reviewed workflow for onboarding a model and validating
 
 Use this path for a new model. Replace `<hf_model>` and `<model_slug>` with your target model values.
 
+### CLI Command Reference
+
+| Command | Who Runs It | Purpose |
+| --- | --- | --- |
+| `run` | human main entry | Run the reviewed runtime pipeline from `config/` and write `output/` + `reports/`. |
+| `validate` | human follow-up | Re-check an existing run and refresh `reports/`. |
+| `prepare-agent-inputs` | human; `spawn-agents` can reuse its outputs | Prepare HF config and source/cookbook inputs for proposal generation. |
+| `spawn-agents` | human | Generate first-pass proposal prompts and optionally invoke external agents. |
+| `merge-proposals` | human; `spawn-agents --count > 1` can call it | Merge multiple proposal drafts and record conflicts. |
+| `check-proposal` | read-only check; repair loops call the same gate | Validate proposal artifacts and update `review_checklist.md`. |
+| `check-repair-loop` | common pre-run repair command | Run static proposal check, generate `check_repair_prompt.md` on failure, optionally invoke an agent, then re-check. |
+| `diagnose-run` | manual debug entry; `run-repair-loop` calls `diagnose_run()` internally | Convert `reports/run_report.json` failures into the `review_checklist.md` tool status block. |
+| `run-repair-loop` | common post-run repair command | Diagnose a failed run, generate `run_repair_prompt.md`, optionally invoke an agent, then re-check the proposal. |
+| `promote-approved` | human after review | Copy approved proposal targets and non-FI drafts into reviewed `config/`. |
+
 ### 1. Prepare Inputs
 
 Prepare the local agent input cache:
@@ -15,7 +30,7 @@ python3 -B -m flashinfer_bench.onboarding.proposal_tools prepare-agent-inputs \
   --model <hf_model>
 ```
 
-This downloads `agent_inputs/config/<model_slug>.json` and clones/updates `agent_inputs/sgl-cookbook/`.
+This downloads `agent_inputs/config/<model_slug>.json` and links `agent_inputs/sgl-cookbook/` to the shared `.onboarding_cache/sgl-cookbook` cache.
 
 ```bash
 # Required after prepare-agent-inputs.
@@ -130,7 +145,7 @@ Minimum approval checklist:
 - Known collectable non-FI ops, currently `rmsnorm` and `silu_and_mul`, have review-only definition/hints drafts before approval.
 - Non-FI drafts are promoted automatically for approved `definition_source=agent` targets.
 
-Proposal tools do not approve anything. `check-proposal` and `repair-loop` only validate or repair proposal artifacts.
+Proposal tools do not approve anything. `check-proposal`, `check-repair-loop`, and `run-repair-loop` only validate or repair proposal artifacts.
 
 ### 4. Run Collect
 
@@ -180,10 +195,19 @@ runs/<model>/<run_id>/reports/run_report.json
 
 ### 6. Repair If Needed
 
-Do not edit `output/` directly. Use `repair-loop` to update the proposal checklist status and optionally invoke an external agent:
+Before runtime, use `check-repair-loop` when the static proposal check fails:
 
 ```bash
-python3 -B -m flashinfer_bench.onboarding.proposal_tools repair-loop \
+python3 -B -m flashinfer_bench.onboarding.proposal_tools check-repair-loop \
+  --proposal-dir runs/<model>/<run_id>/proposal \
+  --hf-config agent_inputs/config/<model_slug>.json \
+  --flashinfer-root agent_inputs/flashinfer/flashinfer
+```
+
+Do not edit `output/` directly. Use `run-repair-loop` to update the proposal checklist status and optionally invoke an external agent:
+
+```bash
+python3 -B -m flashinfer_bench.onboarding.proposal_tools run-repair-loop \
   --run <model>/<run_id> \
   --hf-config agent_inputs/config/<model_slug>.json \
   --flashinfer-root agent_inputs/flashinfer/flashinfer
@@ -192,7 +216,7 @@ python3 -B -m flashinfer_bench.onboarding.proposal_tools repair-loop \
 Automatic repair with an external agent:
 
 ```bash
-python3 -B -m flashinfer_bench.onboarding.proposal_tools repair-loop \
+python3 -B -m flashinfer_bench.onboarding.proposal_tools run-repair-loop \
   --run <model>/<run_id> \
   --hf-config agent_inputs/config/<model_slug>.json \
   --flashinfer-root agent_inputs/flashinfer/flashinfer \
@@ -200,7 +224,7 @@ python3 -B -m flashinfer_bench.onboarding.proposal_tools repair-loop \
   --agent-command "codex exec -C <REPO_ROOT> -s workspace-write --ephemeral" -
 ```
 
-`repair-loop` only repairs `proposal/`; it does not edit `config/`, does not edit `output/`, and does not run Modal. After repair, human-review/promote again, then rerun collect and validate.
+`run-repair-loop` only repairs `proposal/`; it does not edit `config/`, does not edit `output/`, and does not run Modal. After repair, human-review/promote again, then rerun collect and validate.
 
 ## Reference
 
@@ -224,7 +248,8 @@ runs/<model>/<run_id>/
     merge_report.json
     agent_artifacts/
       first_pass_prompt.md
-      repair_prompt.md
+      check_repair_prompt.md
+      run_repair_prompt.md
     definitions/
     definition_hints/
   config/
@@ -336,7 +361,7 @@ Captures are raw argument snapshots created when hooks fire. They are intermedia
 
 Normal collect stops early when a target fails audit/sanitize. Later targets may show zero events because they were not executed. That does not mean those targets are invalid, and they should not be changed to `collect: false` just because of early stop.
 
-`repair-loop` detects early-stop cases and includes the reason in the proposal checklist status.
+`run-repair-loop` detects early-stop cases and includes the reason in the proposal checklist status.
 
 To gather more diagnostics in one run:
 

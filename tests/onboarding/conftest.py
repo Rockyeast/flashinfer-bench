@@ -19,21 +19,23 @@ from flashinfer_bench.onboarding.core.events import (
     build_sanitized_workload_entry,
     load_jsonl,
 )
-from flashinfer_bench.onboarding.runners.modal_runner import (
+from flashinfer_bench.onboarding.runners.remote_runner import (
     _filter_supported_engine_kwargs,
     _materialize_reviewed_artifacts,
     _probe_passes,
     _prompt_scenarios,
     _supplemental_runs,
-    materialize_modal_result,
     run_remote_probe_entrypoint,
 )
+from flashinfer_bench.onboarding.runners.modal_client import materialize_modal_result
 from flashinfer_bench.onboarding.cli import _reviewed_definition_artifacts
-from flashinfer_bench.onboarding.core.planning import (
+from flashinfer_bench.onboarding.core.collect_planning import (
     build_collect_plan_from_probe_plan,
+    load_definitions,
+)
+from flashinfer_bench.onboarding.core.probe_planning import (
     build_modal_probe_plan,
     build_probe_plan,
-    load_definitions,
     load_approved_targets,
 )
 from flashinfer_bench.onboarding.validation import (

@@ -22,28 +22,67 @@ def _run_git(args: list[str], *, cwd: Path | None = None) -> dict[str, Any]:
     }
 
 
-def ensure_sgl_cookbook(*, root: Path, refresh: bool, repo_url: str = DEFAULT_COOKBOOK_REPO) -> dict[str, Any]:
-    """Ensure sgl-cookbook exists under root."""
-    target = root / "sgl-cookbook"
-    if target.exists():
-        if not (target / ".git").exists():
-            return {"path": str(target), "status": "exists_not_git", "ok": False}
+def _ensure_cookbook_cache(*, cache_root: Path, refresh: bool, repo_url: str) -> dict[str, Any]:
+    if cache_root.exists():
+        if not (cache_root / ".git").exists():
+            return {"path": str(cache_root), "status": "cache_exists_not_git", "ok": False}
         if not refresh:
-            return {"path": str(target), "status": "exists", "ok": True}
-        result = _run_git(["pull", "--ff-only"], cwd=target)
+            return {"path": str(cache_root), "status": "cache_exists", "ok": True}
+        result = _run_git(["pull", "--ff-only"], cwd=cache_root)
         return {
-            "path": str(target),
-            "status": "updated" if result["returncode"] == 0 else "update_failed",
+            "path": str(cache_root),
+            "status": "cache_updated" if result["returncode"] == 0 else "cache_update_failed",
             "ok": result["returncode"] == 0,
             "git": result,
         }
-    root.mkdir(parents=True, exist_ok=True)
-    result = _run_git(["clone", "--depth", "1", repo_url, str(target)])
+    cache_root.parent.mkdir(parents=True, exist_ok=True)
+    result = _run_git(["clone", "--depth", "1", repo_url, str(cache_root)])
     return {
-        "path": str(target),
-        "status": "cloned" if result["returncode"] == 0 else "clone_failed",
+        "path": str(cache_root),
+        "status": "cache_cloned" if result["returncode"] == 0 else "cache_clone_failed",
         "ok": result["returncode"] == 0,
         "git": result,
+    }
+
+
+def ensure_sgl_cookbook(
+    *,
+    root: Path,
+    refresh: bool,
+    repo_url: str = DEFAULT_COOKBOOK_REPO,
+    cache_root: Path = DEFAULT_COOKBOOK_CACHE_ROOT,
+) -> dict[str, Any]:
+    """Ensure root/sgl-cookbook is a lightweight reference to the shared cache."""
+    target = root / "sgl-cookbook"
+    cache = _ensure_cookbook_cache(cache_root=cache_root, refresh=refresh, repo_url=repo_url)
+    if not cache.get("ok"):
+        return {"path": str(target), "cache_path": str(cache_root), "status": cache["status"], "ok": False, "cache": cache}
+
+    root.mkdir(parents=True, exist_ok=True)
+    resolved_cache = cache_root.resolve()
+    if target.exists() or target.is_symlink():
+        if target.is_symlink():
+            if target.resolve() != resolved_cache:
+                target.unlink()
+                target.symlink_to(resolved_cache, target_is_directory=True)
+        elif target.resolve() != resolved_cache:
+            return {
+                "path": str(target),
+                "cache_path": str(cache_root),
+                "status": "target_exists_not_link",
+                "ok": False,
+                "cache": cache,
+                "error": "remove or move the existing agent_inputs/sgl-cookbook directory before linking the shared cache",
+            }
+    else:
+        target.symlink_to(resolved_cache, target_is_directory=True)
+
+    return {
+        "path": str(target),
+        "cache_path": str(cache_root),
+        "status": "linked",
+        "ok": True,
+        "cache": cache,
     }
 
 
@@ -147,12 +186,13 @@ def prepare_agent_inputs(
     output_root: Path,
     refresh: bool = False,
     cookbook_repo: str = DEFAULT_COOKBOOK_REPO,
+    cookbook_cache: Path = DEFAULT_COOKBOOK_CACHE_ROOT,
     check_sglang_root: Path | None = None,
     check_flashinfer_root: Path | None = None,
 ) -> dict[str, Any]:
     """Prepare external inputs and return a reproducible report."""
     output_root.mkdir(parents=True, exist_ok=True)
-    cookbook = ensure_sgl_cookbook(root=output_root, refresh=refresh, repo_url=cookbook_repo)
+    cookbook = ensure_sgl_cookbook(root=output_root, refresh=refresh, repo_url=cookbook_repo, cache_root=cookbook_cache)
     configs = [
         fetch_hf_config(model_name=model, config_dir=output_root / "config", refresh=refresh)
         for model in models
@@ -191,4 +231,3 @@ def prepare_agent_inputs(
         "cookbook_candidates": cookbook_matches,
         "source_checks": source_checks,
     }
-

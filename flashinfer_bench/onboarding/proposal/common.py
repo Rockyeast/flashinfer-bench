@@ -23,6 +23,7 @@ from flashinfer_bench.onboarding.core.schemas import CaptureSpec
 
 
 DEFAULT_COOKBOOK_REPO = "https://github.com/sgl-project/sgl-cookbook.git"
+DEFAULT_COOKBOOK_CACHE_ROOT = Path(".onboarding_cache/sgl-cookbook")
 DEFAULT_FLASHINFER_ROOTS = (
     Path("agent_inputs/flashinfer/flashinfer"),
 )

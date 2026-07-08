@@ -2,7 +2,7 @@ from .conftest import *
 
 
 def test_remote_diagnostic_full_scan_disables_early_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import flashinfer_bench.onboarding.runners.modal_runner as modal_runner
+    import flashinfer_bench.onboarding.runners.remote_runner as remote_runner
 
     def fake_prepare_fitrace_dump(output_dir: Path) -> Path:
         path = output_dir / "definitions"
@@ -32,9 +32,9 @@ def test_remote_diagnostic_full_scan_disables_early_check(tmp_path: Path, monkey
             },
         }
 
-    monkeypatch.setattr(modal_runner, "_prepare_fitrace_dump", fake_prepare_fitrace_dump)
-    monkeypatch.setattr(modal_runner, "prepare_worker_injection", fake_prepare_worker_injection)
-    monkeypatch.setattr(modal_runner, "_build_remote_post_capture_outputs", fake_stage)
+    monkeypatch.setattr(remote_runner, "_prepare_fitrace_dump", fake_prepare_fitrace_dump)
+    monkeypatch.setattr(remote_runner, "prepare_worker_injection", fake_prepare_worker_injection)
+    monkeypatch.setattr(remote_runner, "_build_remote_post_capture_outputs", fake_stage)
 
     seen_early_checks = []
     modal_probe_plan = {

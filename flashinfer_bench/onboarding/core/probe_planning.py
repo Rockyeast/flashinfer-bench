@@ -1,16 +1,4 @@
-"""Planning layer: reviewed targets and run config into deterministic plans.
-
-This module is the pure, side-effect-light planning stage of the pipeline:
-
-* load reviewed runtime target config into ``ApprovedTarget`` entries;
-* turn reviewed targets into hook specs (``build_probe_plan``);
-* pair reviewed probe targets with audited/reviewed definitions for collect;
-* validate explicit Modal/SGLang runtime settings (``plan_runtime``);
-* shape reviewed prompt/scenario settings into a JSON-able ``modal_probe_plan``.
-
-None of it touches Modal or a GPU, which keeps it cheap to unit-test. Execution
-lives in capture/modal_runner.
-"""
+"""Probe planning: reviewed target config plus Modal probe run plan."""
 
 from __future__ import annotations
 
@@ -24,9 +12,6 @@ from flashinfer_bench.onboarding.core.schemas import (
     DEFINITION_SOURCES,
     PROBE_MODES,
     ApprovedTarget,
-    CollectPlan,
-    CollectTarget,
-    DefinitionRef,
     ProbePlan,
     ProbeTarget,
     WarmupHook,
@@ -36,6 +21,7 @@ from flashinfer_bench.onboarding.core.schemas import (
 
 DEFAULT_SHAREGPT_PATH = Path("sharegpt_100.json")
 PACKAGE_SHAREGPT_PATH = Path(__file__).resolve().parents[1] / "sharegpt_100.json"
+
 APPROVED_TARGET_FIELDS = {
     "name",
     "role",
@@ -57,19 +43,9 @@ APPROVED_TARGET_FIELDS = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Shared JSON helper
-# ---------------------------------------------------------------------------
-
-
 def _load_json(path: Path) -> Any:
     with path.open(encoding="utf-8") as f:
         return json.load(f)
-
-
-# ---------------------------------------------------------------------------
-# Reviewed target config: config/approved_targets.json -> ApprovedTarget[]
-# ---------------------------------------------------------------------------
 
 
 def load_approved_targets(path: Path) -> list[ApprovedTarget]:
@@ -184,10 +160,6 @@ def load_approved_targets(path: Path) -> list[ApprovedTarget]:
         )
     return targets
 
-# ---------------------------------------------------------------------------
-# Probe plan: reviewed targets -> hook specs
-# ---------------------------------------------------------------------------
-
 
 def build_probe_plan(approved_targets: list[ApprovedTarget]) -> ProbePlan:
     """Return approved dotted Python call targets that should be hooked during probe."""
@@ -256,140 +228,6 @@ def _dispatch_expected_value(target: ProbeTarget) -> int | None:
     return value if isinstance(value, int) else None
 
 
-# ---------------------------------------------------------------------------
-# Collect plan: reviewed/audited definitions + ProbePlan -> CollectPlan
-# ---------------------------------------------------------------------------
-
-
-def load_definitions(definitions_dir: Path) -> dict[str, DefinitionRef]:
-    """Load minimal definition metadata by definition name."""
-    definitions: dict[str, DefinitionRef] = {}
-    for path in sorted(definitions_dir.rglob("*.json")):
-        data = _load_json(path)
-        if not isinstance(data, dict):
-            raise ValueError(f"definition must be an object: {path}")
-        name = data.get("name")
-        op_type = data.get("op_type")
-        if not isinstance(name, str) or not name:
-            raise ValueError(f"definition has invalid name: {path}")
-        if not isinstance(op_type, str) or not op_type:
-            raise ValueError(f"definition {name} has invalid op_type: {path}")
-        raw_tags = data.get("tags", [])
-        if not isinstance(raw_tags, list) or not all(isinstance(tag, str) for tag in raw_tags):
-            raise ValueError(f"definition {name} has invalid tags: {path}")
-        raw_axes = data.get("axes", {})
-        if not isinstance(raw_axes, dict):
-            raise ValueError(f"definition {name} has invalid axes: {path}")
-        if name in definitions:
-            raise ValueError(f"duplicate definition name {name}: {path}")
-        definitions[name] = DefinitionRef(
-            name=name,
-            op_type=op_type,
-            path=path,
-            tags=raw_tags,
-            axes=raw_axes,
-        )
-    return definitions
-
-
-def build_collect_plan_from_probe_plan(
-    *,
-    definitions: dict[str, DefinitionRef],
-    probe_plan: ProbePlan,
-    events: list[dict[str, Any]],
-    definition_aliases: dict[str, str] | None = None,
-) -> CollectPlan:
-    """Build collect targets from already-reviewed probe targets.
-
-    This is used by the remote collect path. FlashInfer targets normally get
-    definition names from same-run fitrace events. Non-FI targets must carry a
-    reviewed ``definition_name`` in the target; capture writes that name into
-    the event, and this function only accepts it if the reviewed definition is
-    present in ``definitions``.
-    """
-    collect_targets: list[CollectTarget] = []
-    skipped: list[dict[str, str]] = list(probe_plan.skipped)
-    seen: set[tuple[str, str]] = set()
-    aliases = definition_aliases or {}
-    events_by_target = _events_by_target_definition(events)
-
-    for target in probe_plan.targets:
-        if not target.collect:
-            skipped.append({
-                "name": target.name,
-                "reason": "collect is false",
-            })
-            continue
-        if target.backend != "flashinfer" and not target.definition_name:
-            skipped.append({
-                "name": target.name,
-                "reason": f"non-fitrace collect target has no reviewed definition_name: {target.backend}",
-            })
-            continue
-        matched_definitions = []
-        for raw_definition_name in sorted(events_by_target.get(target.name, set())):
-            definition_name = aliases.get(raw_definition_name, raw_definition_name)
-            definition = definitions.get(definition_name)
-            if definition is None:
-                skipped.append({
-                    "name": target.name,
-                    "reason": f"event referenced missing definition: {raw_definition_name}",
-                })
-                continue
-            page_size_axis = definition.axes.get("page_size")
-            matched_page_size = (
-                int(page_size_axis["value"])
-                if isinstance(page_size_axis, dict) and isinstance(page_size_axis.get("value"), int)
-                else target.page_size
-            )
-            matched_definitions.append((definition, matched_page_size))
-        if not matched_definitions:
-            skipped.append({"name": target.name, "reason": "no event-linked definition"})
-            continue
-
-        for definition, matched_page_size in matched_definitions:
-            key = (target.name, definition.name)
-            if key in seen:
-                skipped.append({
-                    "name": target.name,
-                    "reason": f"duplicate collect target for definition: {definition.name}",
-                })
-                continue
-            seen.add(key)
-            collect_targets.append(
-                CollectTarget(
-                    name=target.name,
-                    definition_name=definition.name,
-                    op_type=definition.op_type,
-                    target=target.target,
-                    backend=target.backend,
-                    collect=target.collect,
-                    definition_path=definition.path,
-                    page_size=matched_page_size,
-                )
-            )
-
-    collect_targets.sort(key=lambda item: (item.name, item.definition_name))
-    return CollectPlan(targets=collect_targets, skipped=skipped)
-
-
-def _events_by_target_definition(events: list[dict[str, Any]]) -> dict[str, set[str]]:
-    grouped: dict[str, set[str]] = {}
-    for event in events:
-        if bool(event.get("is_warmup")):
-            continue
-        name = event.get("name")
-        definition_name = event.get("definition_name")
-        if isinstance(name, str) and name and isinstance(definition_name, str) and definition_name:
-            grouped.setdefault(name, set()).add(definition_name)
-    return grouped
-
-
-# ---------------------------------------------------------------------------
-# Runtime planning: validate explicit Modal/SGLang settings for a probe run
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class RuntimePlan:
     """Runtime settings needed by a Modal/SGLang probe."""
@@ -420,11 +258,7 @@ def plan_runtime(
     gpu: str,
     tp_size: int,
 ) -> RuntimePlan:
-    """Validate reviewed runtime settings.
-
-    Runtime choices are onboarding/review decisions. The core does not query
-    HF, sgl-cookbook, or model-name heuristics while building a run plan.
-    """
+    """Validate reviewed runtime settings."""
     if not model_name:
         raise ValueError("model_name is required")
     if not image:
@@ -438,24 +272,18 @@ def plan_runtime(
     if final_tp_size < 1:
         raise ValueError("tp_size must be >= 1")
 
-    sources = {
-        "tp_size": "reviewed",
-        "gpu": "reviewed",
-        "image": "reviewed",
-    }
     return RuntimePlan(
         model_name=model_name,
         tp_size=final_tp_size,
         gpu=gpu,
         image=image,
-        sources=sources,
+        sources={
+            "tp_size": "reviewed",
+            "gpu": "reviewed",
+            "image": "reviewed",
+        },
         warnings=[],
     )
-
-
-# ---------------------------------------------------------------------------
-# Prompt/scenario planning for Modal execution
-# ---------------------------------------------------------------------------
 
 
 def build_modal_probe_plan(
@@ -637,8 +465,6 @@ def _load_sharegpt_prompts(path: Path) -> list[str]:
     return prompts
 
 
-# Fixed collect strategy: turn the reviewed ShareGPT prompt file plus reviewed
-# batch sizes into concrete request batches for the remote SGLang run.
 def _build_sharegpt_scenarios(
     *,
     prompts: list[str],
@@ -692,3 +518,12 @@ def _build_sharegpt_scenarios(
             }
         )
     return scenarios
+
+
+__all__ = [
+    "RuntimePlan",
+    "build_modal_probe_plan",
+    "build_probe_plan",
+    "load_approved_targets",
+    "plan_runtime",
+]

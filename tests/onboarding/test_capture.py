@@ -151,7 +151,7 @@ def test_capture_session_tags_events_inside_warmup_window(tmp_path: Path) -> Non
         )
 
         output_dir = tmp_path / "probe_out"
-        session = CaptureSession(probe_plan=plan, output_dir=output_dir, max_captures_per_target=4)
+        session = CaptureSession(probe_plan=plan, output_dir=output_dir, max_captures_per_target=1)
         session.install()
         try:
             mod.warmup()  # kernel called inside the warmup window
@@ -166,6 +166,9 @@ def test_capture_session_tags_events_inside_warmup_window(tmp_path: Path) -> Non
         ]
         warmup_flags = [event["is_warmup"] for event in events]
         assert warmup_flags == [True, False]
+        assert "capture_path" not in events[0]
+        assert events[1]["capture_path"].endswith("000001_kernel.pt")
+        assert sorted(path.name for path in (output_dir / "captures").glob("*.pt")) == ["000001_kernel.pt"]
         # Warmup window fully unwound after the run.
         assert session.is_warmup is False
     finally:
@@ -236,4 +239,3 @@ def test_companion_capture_merges_forward_args_into_run_payload(tmp_path: Path) 
         sys.path.remove(str(tmp_path))
         sys.modules.pop("companion_pkg.mod", None)
         sys.modules.pop("companion_pkg", None)
-

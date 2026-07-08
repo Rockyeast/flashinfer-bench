@@ -141,6 +141,8 @@ def run_proposal_gate(
         hf_config_path=hf_config_path,
         flashinfer_root=flashinfer_root,
     )
+    check_report_path = proposal_dir / "proposal_check.json"
+    _write_json(check_report_path, check_report)
     review_path = _write_review_tool_status(proposal_dir, _proposal_tool_status_markdown(check_report))
     result = {
         "summary": {
@@ -154,6 +156,7 @@ def run_proposal_gate(
         "hf_config_path": str(hf_config_path),
         "flashinfer_root": str(flashinfer_root) if flashinfer_root is not None else None,
         "outputs": {
+            "proposal_check": str(check_report_path),
             "review_checklist": str(review_path),
         },
         "check_report": check_report,

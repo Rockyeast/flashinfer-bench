@@ -20,13 +20,13 @@ from flashinfer_bench.onboarding.core.capture import (
 )
 from flashinfer_bench.onboarding.core.definition_audit import audit_and_repair_definitions, prepare_definition_for_output
 from flashinfer_bench.onboarding.core.events import build_event_report, load_jsonl
-from flashinfer_bench.onboarding.core.planning import (
+from flashinfer_bench.onboarding.core.collect_planning import (
     build_collect_plan_from_probe_plan,
     load_definitions,
 )
 from flashinfer_bench.onboarding.core.schemas import CollectPlan, ProbePlan, max_captures_from_plan_payload
 
-DEFAULT_REMOTE_OUTPUT_DIR = "/tmp/flashinfer-trace-probe"
+DEFAULT_REMOTE_OUTPUT_DIR = "/tmp/flashinfer-bench-onboarding-probe"
 DEFAULT_WORKER_SITE_DIR = "/tmp/flashinfer-trace-site"
 FITRACE_DUMP_ENV = "FLASHINFER_TRACE_DUMP"
 FITRACE_DUMP_DIR_ENV = "FLASHINFER_TRACE_DUMP_DIR"
@@ -494,13 +494,16 @@ def _build_remote_post_capture_outputs(
     collect_dir = output_dir / "collect"
     audited_definitions_dir = output_dir / "audited_definitions"
     definition_hints_dir = output_dir / "definition_hints"
+    generated_definition_hints_dir = output_dir / "generated_definition_hints"
     definition_audit_report = audit_and_repair_definitions(
         raw_definitions_dir=fitrace_definitions_dir,
         output_definitions_dir=audited_definitions_dir,
-        output_hints_dir=definition_hints_dir,
+        output_hints_dir=generated_definition_hints_dir,
         events_path=events_path,
         report_dir=output_dir / "definition_audit",
     )
+    if generated_definition_hints_dir.exists():
+        shutil.copytree(generated_definition_hints_dir, definition_hints_dir, dirs_exist_ok=True)
     reviewed_overwrites = _materialize_reviewed_artifacts(
         modal_probe_plan=modal_probe_plan,
         definitions_dir=audited_definitions_dir,
@@ -527,6 +530,7 @@ def _build_remote_post_capture_outputs(
         "collect_dir": collect_dir,
         "audited_definitions_dir": audited_definitions_dir,
         "definition_hints_dir": definition_hints_dir,
+        "generated_definition_hints_dir": generated_definition_hints_dir,
         "definition_audit_report": definition_audit_report,
         "collect_plan": collect_plan_payload,
         "workload_manifest": manifest,
@@ -683,6 +687,7 @@ def run_remote_probe_entrypoint(
     )
     collect_dir = stage["collect_dir"]
     audited_definitions_dir = stage["audited_definitions_dir"]
+    generated_definition_hints_dir = stage["generated_definition_hints_dir"]
     definition_audit_report = stage["definition_audit_report"]
     collect_plan_payload = stage["collect_plan"]
     manifest = stage["workload_manifest"]
@@ -705,10 +710,17 @@ def run_remote_probe_entrypoint(
         arcname="definitions",
         label="definitions",
     )
+    result["definition_hints_archive_b64"] = _read_dir_archive_b64(
+        generated_definition_hints_dir,
+        archive_name="generated_definition_hints.tar.gz",
+        arcname="generated_definition_hints",
+        label="generated definition hints",
+    )
     result["summary"]["fitrace_definitions"] = _count_files(fitrace_definitions_dir)
     result["summary"]["audited_definitions"] = _count_files(audited_definitions_dir)
     result["summary"]["definition_audit_repaired"] = definition_audit_report.get("summary", {}).get("repaired", 0)
     result["summary"]["definition_audit_rejected"] = definition_audit_report.get("summary", {}).get("rejected", 0)
+    result["summary"]["definition_audit_hints"] = definition_audit_report.get("summary", {}).get("hints", 0)
     result["summary"]["workloads"] = manifest.get("summary", {}).get("workloads", 0)
     result["summary"]["sanitized"] = manifest.get("summary", {}).get("sanitized", 0)
     return result
@@ -736,104 +748,6 @@ def run_remote_sglang_probe(modal_probe_plan: dict[str, Any], remote_output_dir:
     )
     return result
 
-
-def run_modal_probe(
-    *,
-    modal_probe_plan: dict[str, Any],
-    output_dir: Path,
-    timeout: int = 3600,
-    resume_call_id: str | None = None,
-) -> dict[str, Any]:
-    """Launch the remote Modal probe using ``modal run`` for streaming logs."""
-    runtime = modal_probe_plan.get("runtime", {})
-    image_name = str(runtime.get("image") or "lmsysorg/sglang:v0.5.12.post1")
-    gpu = str(runtime.get("gpu") or "")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    plan_path = output_dir / "modal_probe_plan.json"
-    plan_path.write_text(json.dumps(modal_probe_plan, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-
-    env = os.environ.copy()
-    env["FLASHINFER_TRACE_MODAL_IMAGE"] = image_name
-    env["FLASHINFER_TRACE_MODAL_TIMEOUT"] = str(timeout)
-    if gpu:
-        env["FLASHINFER_TRACE_MODAL_GPU"] = gpu
-    else:
-        env.pop("FLASHINFER_TRACE_MODAL_GPU", None)
-
-    cmd = [
-        "modal",
-        "run",
-        "-m",
-        "flashinfer_bench.onboarding.runners.modal_app::probe",
-        "--plan-path",
-        str(plan_path),
-        "--output-dir",
-        str(output_dir),
-    ]
-    if resume_call_id:
-        cmd.extend(["--resume-call-id", resume_call_id])
-    print(
-        "[flashinfer_bench.onboarding] launching Modal CLI probe: "
-        f"image={image_name} gpu={gpu or 'none'} timeout={timeout}s",
-        flush=True,
-    )
-    print(f"[flashinfer_bench.onboarding] command: {' '.join(cmd)}", flush=True)
-    subprocess.run(cmd, check=True, env=env)
-
-    result_path = output_dir / "modal_result.json"
-    if not result_path.exists():
-        raise FileNotFoundError(f"Modal probe did not write result: {result_path}")
-    return json.loads(result_path.read_text(encoding="utf-8"))
-
-
-# ---------------------------------------------------------------------------
-# Result materialization (local/result-IO side of the Modal probe)
-# ---------------------------------------------------------------------------
-#
-# Turn the result dict returned by the remote entrypoint into local reports and
-# remote-collect outputs on disk.
-
-
-def materialize_modal_result(result: dict[str, Any], output_dir: Path) -> None:
-    """Materialize returned Modal probe artifacts into the run directory.
-
-    ``output_dir`` is a transient Modal CLI handoff directory. Standard run
-    artifacts are written under the parent run's ``output`` and ``reports``
-    directories; raw Modal handoff files are not part of the public run layout.
-    """
-    print("[flashinfer_bench.onboarding] remote result received; materializing local outputs", flush=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    run_dir = output_dir.parent
-    shutil.rmtree(output_dir / "captures", ignore_errors=True)
-    output_root = run_dir / "output"
-    definitions_dir = output_root / "definitions"
-    _materialize_definition_outputs(definitions_dir, result)
-    _materialize_collect_outputs(
-        result,
-        collect_dir=output_dir / "collect",
-        output_root=output_root,
-        definitions_dir=definitions_dir,
-    )
-    result_path = output_dir / "modal_result.json"
-    result_path.write_text(
-        json.dumps(_redact_modal_result(result), indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-
-
-def _redact_modal_result(result: dict[str, Any]) -> dict[str, Any]:
-    redacted = dict(result)
-    for key in (
-        "collect_archive_b64",
-        "definitions_archive_b64",
-    ):
-        value = redacted.get(key)
-        if isinstance(value, str):
-            redacted[key] = {
-                "redacted": True,
-                "encoded_bytes": len(value),
-            }
-    return redacted
 
 
 def _count_lines(path: Path) -> int:
@@ -904,162 +818,3 @@ def _read_worker_status(root: Path) -> list[dict[str, Any]]:
             data = {"path": str(path), "error_type": type(exc).__name__, "error": str(exc)}
         statuses.append(data if isinstance(data, dict) else {"path": str(path), "data": data})
     return statuses
-
-
-def _materialize_collect_outputs(
-    result: dict[str, Any],
-    *,
-    collect_dir: Path,
-    output_root: Path,
-    definitions_dir: Path,
-) -> None:
-    archive_b64 = result.get("collect_archive_b64")
-    if not isinstance(archive_b64, str) or not archive_b64:
-        return
-
-    _write_named_archive(root=collect_dir, archive_b64=archive_b64, expected_root="collect")
-
-    # Incremental workload merge: move only new/updated targets, preserve existing ones.
-    src_workloads = collect_dir / "workloads"
-    dst_workloads = output_root / "workloads"
-    if src_workloads.exists():
-        for src_op_dir in src_workloads.iterdir():
-            if not src_op_dir.is_dir():
-                continue
-            dst_op_dir = dst_workloads / src_op_dir.name
-            dst_op_dir.mkdir(parents=True, exist_ok=True)
-            for src_file in src_op_dir.iterdir():
-                shutil.move(str(src_file), str(dst_op_dir / src_file.name))
-
-    src_blob = collect_dir / "blob"
-    dst_blob = output_root / "blob"
-    if src_blob.exists():
-        for src_op_dir in src_blob.glob("workloads/*"):
-            if not src_op_dir.is_dir():
-                continue
-            dst_op_dir = dst_blob / "workloads" / src_op_dir.name
-            # Remove stale safetensors for this target before writing new ones
-            shutil.rmtree(dst_op_dir, ignore_errors=True)
-            dst_op_dir.mkdir(parents=True, exist_ok=True)
-            for src_file in src_op_dir.iterdir():
-                shutil.move(str(src_file), str(dst_op_dir / src_file.name))
-
-    rewrite_collect_output_paths(
-        collect_dir,
-        local_collect_dir=output_root,
-        local_definitions_dir=definitions_dir,
-    )
-    plan_path = collect_dir / "collect_plan.json"
-    manifest_path = collect_dir / "workload_manifest.json"
-    if plan_path.exists():
-        result["collect_plan"] = json.loads(plan_path.read_text(encoding="utf-8"))
-    if manifest_path.exists():
-        new_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        # Merge with existing manifest: new entries overwrite, existing skipped entries preserved
-        existing_manifest: dict[str, Any] = {}
-        # Check run_report for previously stored manifest
-        run_report_path = output_root.parent / "reports" / "run_report.json"
-        if run_report_path.exists():
-            try:
-                run_report = json.loads(run_report_path.read_text(encoding="utf-8"))
-                prev = run_report.get("collect", {}).get("manifest")
-                if isinstance(prev, dict):
-                    existing_manifest = prev
-            except Exception:  # noqa: BLE001
-                pass
-        if existing_manifest:
-            new_workload_names = {
-                w["definition_name"]
-                for w in (new_manifest.get("workloads") or [])
-                if isinstance(w, dict) and w.get("definition_name")
-            }
-            preserved = [
-                w for w in (existing_manifest.get("workloads") or [])
-                if isinstance(w, dict) and w.get("definition_name") not in new_workload_names
-            ]
-            merged_workloads = preserved + (new_manifest.get("workloads") or [])
-            new_manifest["workloads"] = merged_workloads
-            # Recompute summary counts
-            summary = new_manifest.get("summary") or {}
-            summary["workloads"] = len(merged_workloads)
-            summary["captures"] = sum(int(w.get("event_count", 0)) for w in merged_workloads if isinstance(w, dict))
-            summary["sanitized"] = sum(int(w.get("sanitized_count", 0)) for w in merged_workloads if isinstance(w, dict))
-            summary["workload_files"] = sum(len(w.get("blob_paths") or []) for w in merged_workloads if isinstance(w, dict))
-            new_manifest["summary"] = summary
-        result["workload_manifest"] = new_manifest
-    shutil.rmtree(collect_dir, ignore_errors=True)
-
-
-def _materialize_definition_outputs(root: Path, result: dict[str, Any]) -> None:
-    archive_b64 = result.get("definitions_archive_b64")
-    if isinstance(archive_b64, str) and archive_b64:
-        _write_named_archive(root=root, archive_b64=archive_b64, expected_root="definitions")
-
-
-def rewrite_collect_output_paths(
-    collect_dir: Path,
-    *,
-    local_collect_dir: Path,
-    local_definitions_dir: Path | None = None,
-) -> None:
-    """Rewrite remote absolute paths in collect outputs to local extracted paths."""
-    for path in (collect_dir / "workload_manifest.json", collect_dir / "collect_plan.json"):
-        _rewrite_collect_json_paths(
-            path,
-            local_collect_dir=local_collect_dir,
-            local_definitions_dir=local_definitions_dir,
-        )
-
-
-def _rewrite_collect_json_paths(
-    path: Path,
-    *,
-    local_collect_dir: Path,
-    local_definitions_dir: Path | None,
-) -> None:
-    if not path.exists():
-        return
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return
-
-    remote_collect_prefix = f"{DEFAULT_REMOTE_OUTPUT_DIR}/collect/"
-    remote_definitions_prefix = f"{DEFAULT_REMOTE_OUTPUT_DIR}/definitions/"
-    remote_audited_definitions_prefix = f"{DEFAULT_REMOTE_OUTPUT_DIR}/audited_definitions/"
-
-    def rewrite(value: Any) -> Any:
-        if isinstance(value, str):
-            if value.startswith(remote_collect_prefix):
-                return str(local_collect_dir / value.removeprefix(remote_collect_prefix))
-            if local_definitions_dir is not None and value.startswith(remote_definitions_prefix):
-                return str(local_definitions_dir / value.removeprefix(remote_definitions_prefix))
-            if local_definitions_dir is not None and value.startswith(remote_audited_definitions_prefix):
-                return str(local_definitions_dir / value.removeprefix(remote_audited_definitions_prefix))
-            return value
-        if isinstance(value, list):
-            return [rewrite(item) for item in value]
-        if isinstance(value, dict):
-            return {key: rewrite(item) for key, item in value.items()}
-        return value
-
-    rewritten = rewrite(payload)
-    path.write_text(json.dumps(rewritten, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-
-
-def _write_named_archive(*, root: Path, archive_b64: str, expected_root: str) -> None:
-    root_parent = root.parent
-    root_parent.mkdir(parents=True, exist_ok=True)
-    shutil.rmtree(root, ignore_errors=True)
-    archive_path = root_parent / f"{expected_root}.tar.gz"
-    archive_path.write_bytes(base64.b64decode(archive_b64.encode("ascii")))
-    with tarfile.open(archive_path, "r:gz") as archive:
-        for member in archive.getmembers():
-            member_path = root_parent / member.name
-            if not member_path.resolve().is_relative_to(root_parent.resolve()):
-                raise ValueError(f"unsafe archive member: {member.name}")
-        try:
-            archive.extractall(root_parent, filter="data")
-        except TypeError:
-            archive.extractall(root_parent)
-    archive_path.unlink(missing_ok=True)

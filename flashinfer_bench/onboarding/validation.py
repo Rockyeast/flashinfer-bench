@@ -16,10 +16,10 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from flashinfer_bench.onboarding.core.planning import (
+from flashinfer_bench.onboarding.core.collect_planning import load_definitions
+from flashinfer_bench.onboarding.core.probe_planning import (
     build_probe_plan,
     load_approved_targets,
-    load_definitions,
 )
 from flashinfer_bench.onboarding.core.schemas import ApprovedTarget
 

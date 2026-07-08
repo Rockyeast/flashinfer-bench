@@ -606,25 +606,10 @@ class CaptureSession:
         if not self._target_allowed_by_scope(target, scope):
             return
         scope_name = scope.get("name") if isinstance(scope.get("name"), str) else "default"
-        capture_key = (target.name, scope_name)
-        if self.max_captures_per_target > 0 and self._capture_counts[capture_key] >= self.max_captures_per_target:
-            return
-        self._capture_counts[capture_key] += 1
-        self._event_index += 1
-        capture_path = self.captures_dir / f"{self._event_index:06d}_{target.name}.pt"
         definition_name = (
             traced_definition.get("name")
             if isinstance(traced_definition, dict) and isinstance(traced_definition.get("name"), str)
             else target.definition_name
-        )
-        actual_capture_path = self._write_capture_file(
-            capture_path,
-            target,
-            args,
-            kwargs,
-            scope,
-            definition_name=definition_name,
-            traced_definition=traced_definition,
         )
         event = {
             "schema_version": CAPTURE_SCHEMA_VERSION,
@@ -637,13 +622,29 @@ class CaptureSession:
             "active_probe_mode": os.environ.get("FLASHINFER_TRACE_ACTIVE_PROBE_MODE"),
             "capture_scope": scope_name,
             "is_warmup": self.is_warmup,
-            "capture_path": str(actual_capture_path),
-            "capture_format": "torch.pt" if actual_capture_path.suffix == ".pt" else "json",
         }
         if target.dispatch is not None:
             detected = infer_dispatch_value(target.dispatch, args)
             if detected is not None:
                 event[target.dispatch.field] = detected
+        if not self.is_warmup:
+            capture_key = (target.name, scope_name)
+            if self.max_captures_per_target > 0 and self._capture_counts[capture_key] >= self.max_captures_per_target:
+                return
+            self._capture_counts[capture_key] += 1
+            self._event_index += 1
+            capture_path = self.captures_dir / f"{self._event_index:06d}_{target.name}.pt"
+            actual_capture_path = self._write_capture_file(
+                capture_path,
+                target,
+                args,
+                kwargs,
+                scope,
+                definition_name=definition_name,
+                traced_definition=traced_definition,
+            )
+            event["capture_path"] = str(actual_capture_path)
+            event["capture_format"] = "torch.pt" if actual_capture_path.suffix == ".pt" else "json"
         with self.events_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(event, ensure_ascii=False, default=repr) + "\n")
 

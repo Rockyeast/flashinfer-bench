@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from flashinfer_bench.onboarding.proposal.common import (
+    DEFAULT_COOKBOOK_CACHE_ROOT,
     DEFAULT_COOKBOOK_REPO,
     DEFAULT_COOKBOOK_ROOT,
     DEFAULT_FLASHINFER_ROOT,
@@ -21,7 +22,7 @@ from flashinfer_bench.onboarding.proposal.workflow.diagnose import diagnose_run
 from flashinfer_bench.onboarding.proposal.workflow.merge import merge_proposals
 from flashinfer_bench.onboarding.proposal.workflow.prepare import prepare_agent_inputs
 from flashinfer_bench.onboarding.proposal.workflow.promote import promote_approved_targets
-from flashinfer_bench.onboarding.proposal.workflow.repair import repair_loop
+from flashinfer_bench.onboarding.proposal.workflow.repair import check_repair_loop, run_repair_loop
 from flashinfer_bench.onboarding.proposal.workflow.spawn import spawn_agents
 
 
@@ -34,6 +35,7 @@ def _add_prepare_agent_inputs_parser(subparsers: argparse._SubParsersAction) -> 
     parser.add_argument("--output-root", type=Path, default=Path("agent_inputs"))
     parser.add_argument("--refresh", action="store_true", help="Update cookbook and re-download configs.")
     parser.add_argument("--cookbook-repo", default=DEFAULT_COOKBOOK_REPO)
+    parser.add_argument("--cookbook-cache", type=Path, default=DEFAULT_COOKBOOK_CACHE_ROOT)
     parser.add_argument("--check-sglang-root", type=Path, default=Path("agent_inputs/sglang/python/sglang"))
     parser.add_argument("--check-flashinfer-root", type=Path, default=Path("agent_inputs/flashinfer/flashinfer"))
 
@@ -60,10 +62,35 @@ def _add_diagnose_run_parser(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--run", type=Path, required=True, help="Run path or path relative to runs/.")
 
 
-def _add_repair_loop_parser(subparsers: argparse._SubParsersAction) -> None:
+def _add_check_repair_loop_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
-        "repair-loop",
-        help="Generate a fixed repair prompt from run diagnostics and optionally invoke an external agent.",
+        "check-repair-loop",
+        help="Repair proposal check failures before runtime run; optionally invoke an external agent.",
+    )
+    parser.add_argument("--proposal-dir", type=Path, required=True)
+    parser.add_argument("--hf-config", type=Path, required=True)
+    parser.add_argument(
+        "--flashinfer-root",
+        type=Path,
+        help="Path to flashinfer/ source root for static fitrace checks.",
+    )
+    parser.add_argument(
+        "--max-rounds",
+        type=int,
+        default=1,
+        help="Maximum check/repair rounds when --agent-command is provided.",
+    )
+    parser.add_argument(
+        "--agent-command",
+        nargs=argparse.REMAINDER,
+        help="Optional external agent command. The check repair prompt is sent to stdin; pass this after check-repair-loop options.",
+    )
+
+
+def _add_run_repair_loop_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "run-repair-loop",
+        help="Repair proposal issues from run diagnostics; optionally invoke an external agent.",
     )
     parser.add_argument("--run", type=Path, required=True, help="Run path or path relative to runs/.")
     parser.add_argument("--hf-config", type=Path, required=True)
@@ -76,12 +103,12 @@ def _add_repair_loop_parser(subparsers: argparse._SubParsersAction) -> None:
         "--max-rounds",
         type=int,
         default=1,
-        help="Maximum repair/check rounds when --agent-command is provided.",
+        help="Maximum run repair/check rounds when --agent-command is provided.",
     )
     parser.add_argument(
         "--agent-command",
         nargs=argparse.REMAINDER,
-        help="Optional external agent command. The repair prompt is sent to stdin; pass this after repair-loop options.",
+        help="Optional external agent command. The run repair prompt is sent to stdin; pass this after run-repair-loop options.",
     )
 
 
@@ -166,7 +193,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_prepare_agent_inputs_parser(subparsers)
     _add_check_proposal_parser(subparsers)
     _add_diagnose_run_parser(subparsers)
-    _add_repair_loop_parser(subparsers)
+    _add_check_repair_loop_parser(subparsers)
+    _add_run_repair_loop_parser(subparsers)
     _add_spawn_agents_parser(subparsers)
     _add_merge_proposals_parser(subparsers)
     _add_promote_approved_parser(subparsers)
@@ -182,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
             output_root=args.output_root,
             refresh=args.refresh,
             cookbook_repo=args.cookbook_repo,
+            cookbook_cache=args.cookbook_cache,
             check_sglang_root=args.check_sglang_root,
             check_flashinfer_root=args.check_flashinfer_root,
         )
@@ -204,6 +233,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ready for human review: {summary['ready_for_human_review']}")
         print(f"errors: {summary['errors']}")
         print(f"warnings: {summary['warnings']}")
+        print(f"proposal check: {result['outputs']['proposal_check']}")
         print(f"review checklist: {result['outputs']['review_checklist']}")
         return 0 if summary["ok"] else 1
 
@@ -217,8 +247,27 @@ def main(argv: list[str] | None = None) -> int:
         print(f"review checklist: {result['outputs']['review_checklist']}")
         return 0 if summary["ok"] else 1
 
-    if args.command == "repair-loop":
-        result = repair_loop(
+    if args.command == "check-repair-loop":
+        result = check_repair_loop(
+            proposal_dir=args.proposal_dir,
+            hf_config_path=args.hf_config,
+            flashinfer_root=args.flashinfer_root,
+            agent_command=args.agent_command,
+            max_rounds=args.max_rounds,
+        )
+        summary = result["summary"]
+        print(f"ready for human review: {summary['ready_for_human_review']}")
+        print(f"errors: {summary['errors']}")
+        print(f"warnings: {summary['warnings']}")
+        print(f"rounds: {summary['rounds']}/{summary['max_rounds']}")
+        print(f"agent ran: {summary['agent_ran']}")
+        print(f"proposal check: {result['outputs']['proposal_check']}")
+        print(f"review checklist: {result['outputs']['review_checklist']}")
+        print(f"check repair prompt: {result['outputs']['check_repair_prompt']}")
+        return 0 if summary["ready_for_human_review"] else 1
+
+    if args.command == "run-repair-loop":
+        result = run_repair_loop(
             run=args.run,
             hf_config_path=args.hf_config,
             flashinfer_root=args.flashinfer_root,
@@ -233,7 +282,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"warnings: {summary['warnings']}")
         print(f"rounds: {summary['rounds']}/{summary['max_rounds']}")
         print(f"agent ran: {summary['agent_ran']}")
-        print(f"repair prompt: {result['outputs']['repair_prompt']}")
+        print(f"run repair prompt: {result['outputs']['run_repair_prompt']}")
         print(f"review checklist: {result['outputs']['review_checklist']}")
         return 0 if summary["ready_for_human_review"] else 1
 
