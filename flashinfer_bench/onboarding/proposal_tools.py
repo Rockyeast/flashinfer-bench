@@ -170,6 +170,59 @@ def _add_spawn_agents_parser(subparsers: argparse._SubParsersAction) -> None:
     )
 
 
+def _add_first_pass_loop_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "first-pass-loop",
+        help="Run initial agents, merge proposals, check the merged proposal, and repair static failures.",
+    )
+    parser.add_argument("--model", required=True, help="HF model name, for example microsoft/Phi-4-mini-instruct.")
+    parser.add_argument(
+        "--run-prefix",
+        type=Path,
+        help="Base run path or path relative to runs/. Defaults to <model_slug>/<YYYYMMDD>.",
+    )
+    parser.add_argument("--hf-config", type=Path, help="Defaults to agent_inputs/config/<model_slug>.json.")
+    parser.add_argument("--sglang-root", type=Path, default=DEFAULT_SGLANG_ROOT)
+    parser.add_argument("--flashinfer-root", type=Path, default=DEFAULT_FLASHINFER_ROOT)
+    parser.add_argument("--cookbook-root", type=Path, default=DEFAULT_COOKBOOK_ROOT)
+    parser.add_argument(
+        "--sglang-model-hint",
+        action="append",
+        default=[],
+        help="Relative SGLang source hint. Can be passed multiple times.",
+    )
+    parser.add_argument("--count", type=int, default=3, help="Number of initial proposal agents. Defaults to 3.")
+    parser.add_argument(
+        "--max-rounds",
+        type=int,
+        default=3,
+        help="Maximum merged-proposal check repair rounds. Defaults to 3.",
+    )
+    parser.add_argument(
+        "--merge-output-dir",
+        type=Path,
+        help="Output proposal directory. Defaults to <run_prefix>_merged/proposal.",
+    )
+    parser.add_argument(
+        "--skip-prepare",
+        action="store_true",
+        help="Do not refresh agent_inputs before spawning agents.",
+    )
+    parser.add_argument("--refresh", action="store_true", help="Refresh prepared agent inputs.")
+    parser.add_argument("--cookbook-repo", default=DEFAULT_COOKBOOK_REPO)
+    parser.add_argument("--cookbook-cache", type=Path, default=DEFAULT_COOKBOOK_CACHE_ROOT)
+    parser.add_argument(
+        "--agent",
+        choices=["codex"],
+        help="Shortcut external agent command. Currently supports codex.",
+    )
+    parser.add_argument(
+        "--agent-command",
+        nargs=argparse.REMAINDER,
+        help="Optional explicit external agent command. Overrides --agent. Each prompt is sent to stdin.",
+    )
+
+
 def _add_merge_proposals_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         "merge-proposals",
@@ -206,6 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_check_repair_loop_parser(subparsers)
     _add_run_repair_loop_parser(subparsers)
     _add_spawn_agents_parser(subparsers)
+    _add_first_pass_loop_parser(subparsers)
     _add_merge_proposals_parser(subparsers)
     _add_promote_approved_parser(subparsers)
     return parser
@@ -345,6 +399,71 @@ def main(argv: list[str] | None = None) -> int:
         if summary["merge_ok"] is not None:
             ok = ok and bool(summary["merge_ok"])
         return 0 if ok else 1
+
+    if args.command == "first-pass-loop":
+        run_prefix = args.run_prefix or _default_run_prefix(args.model)
+        hf_config_path = args.hf_config or _default_hf_config_path(args.model)
+        agent_command = args.agent_command
+        agent_env = None
+        if agent_command is None:
+            agent_command, agent_env = _agent_command_from_shortcut(args.agent)
+        if agent_command is None:
+            raise SystemExit("ERROR: first-pass-loop requires --agent or --agent-command.")
+
+        if not args.skip_prepare:
+            prepare_report = prepare_agent_inputs(
+                models=[args.model],
+                output_root=Path("agent_inputs"),
+                refresh=args.refresh,
+                cookbook_repo=args.cookbook_repo,
+                cookbook_cache=args.cookbook_cache,
+                check_sglang_root=args.sglang_root,
+                check_flashinfer_root=args.flashinfer_root,
+            )
+            prepare_summary = prepare_report["summary"]
+            print(f"prepare configs ok: {prepare_summary['configs_ok']}")
+            print(f"prepare cookbook ok: {prepare_summary['cookbook_ok']}")
+
+        merge_output_dir = args.merge_output_dir or _default_merge_output_dir(run_prefix)
+        spawn_result = spawn_agents(
+            model_name=args.model,
+            run_prefix=run_prefix,
+            hf_config_path=hf_config_path,
+            sglang_root=args.sglang_root,
+            flashinfer_root=args.flashinfer_root,
+            cookbook_root=args.cookbook_root,
+            sglang_model_hints=args.sglang_model_hint,
+            count=args.count,
+            agent_command=agent_command,
+            agent_env=agent_env,
+            merge_output_dir=merge_output_dir,
+            progress=True,
+        )
+        spawn_summary = spawn_result["summary"]
+        print(f"model: {spawn_summary['model']}")
+        print(f"agents started: {spawn_summary['agents_started']}")
+        print(f"agent failures: {spawn_summary['agent_failures']}")
+        print(f"merge report: {spawn_result['merge_report']}")
+        if spawn_summary["agent_failures"] != 0 or not spawn_summary["merge_ok"]:
+            return 1
+
+        repair_result = check_repair_loop(
+            proposal_dir=merge_output_dir,
+            hf_config_path=hf_config_path,
+            flashinfer_root=args.flashinfer_root,
+            agent_command=agent_command,
+            agent_env=agent_env,
+            max_rounds=args.max_rounds,
+        )
+        repair_summary = repair_result["summary"]
+        print(f"merged proposal: {merge_output_dir}")
+        print(f"proposal check: {repair_result['outputs']['proposal_check']}")
+        print(f"review checklist: {repair_result['outputs']['review_checklist']}")
+        print(f"ready for human review: {repair_summary['ready_for_human_review']}")
+        print(f"errors: {repair_summary['errors']}")
+        print(f"warnings: {repair_summary['warnings']}")
+        print(f"rounds: {repair_summary['rounds']}/{repair_summary['max_rounds']}")
+        return 0 if repair_summary["ready_for_human_review"] else 1
 
     if args.command == "merge-proposals":
         result = merge_proposals(

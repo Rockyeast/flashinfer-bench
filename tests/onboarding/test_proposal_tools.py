@@ -277,7 +277,7 @@ def test_repair_loop_passes_prompt_to_agent_stdin_and_rechecks(tmp_path: Path) -
         encoding="utf-8",
     )
 
-    result = repair_loop(
+    result = run_repair_loop(
         run=run_dir,
         hf_config_path=hf_config,
         agent_command=[sys.executable, str(agent_script), str(proposal_dir)],
@@ -292,7 +292,7 @@ def test_repair_loop_passes_prompt_to_agent_stdin_and_rechecks(tmp_path: Path) -
     seen_prompt = (proposal_dir / "seen_prompt.md").read_text(encoding="utf-8")
     assert "FIX_REQUIRED" in seen_prompt
     assert "extra_definition" in seen_prompt
-    assert Path(result["outputs"]["repair_prompt"]).exists()
+    assert Path(result["outputs"]["run_repair_prompt"]).exists()
 
 def test_spawn_agents_generates_isolated_first_pass_prompts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)

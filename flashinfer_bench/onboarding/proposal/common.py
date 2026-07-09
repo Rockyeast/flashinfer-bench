@@ -34,6 +34,23 @@ CAPTURE_SPEC_FIELDS = {field_info.name for field_info in fields(CaptureSpec)}
 DEFINITION_REQUIRED_FIELDS = {"name", "op_type", "axes", "inputs", "outputs"}
 HINT_REQUIRED_FIELDS = {"schema_version", "definition_name", "op_type", "inputs"}
 KNOWN_NON_FITRACE_COLLECTABLE_OPS = {"rmsnorm", "silu_and_mul"}
+PROMPT_TEMPLATE_DIR = Path(__file__).with_name("prompts")
+
+
+def _load_prompt_template(name: str) -> str:
+    return (PROMPT_TEMPLATE_DIR / name).read_text(encoding="utf-8")
+
+
+def _render_prompt_template(name: str, **values: Any) -> str:
+    normalized = {key: str(value) for key, value in values.items()}
+    return string.Template(_load_prompt_template(name)).safe_substitute(normalized).rstrip() + "\n"
+
+
+def _non_fitrace_definition_rules_markdown() -> str:
+    return _load_prompt_template("non_fi_definition_rules.md").rstrip()
+
+
+NON_FITRACE_DEFINITION_SCHEMA_GUIDE = _non_fitrace_definition_rules_markdown().splitlines()
 COMPANION_REQUIRED_WRAPPER_SUFFIXES = (
     "BatchDecodeWithPagedKVCacheWrapper.run",
     "BatchPrefillWithPagedKVCacheWrapper.run",
@@ -144,7 +161,9 @@ def _resolve_proposal_dir(path: Path) -> Path:
 
 
 def _resolve_run_dir(run: Path) -> Path:
-    return run if run.exists() else Path("runs") / run
+    if run.exists() or (run.parts and run.parts[0] == "runs"):
+        return run
+    return Path("runs") / run
 
 
 def _display_path(path: Path) -> str:

@@ -13,6 +13,7 @@ Use this path for a new model. Replace `<hf_model>` and `<model_slug>` with your
 | `run` | human main entry | Run the reviewed runtime pipeline from `config/` and write `output/` + `reports/`. |
 | `validate` | human follow-up | Re-check an existing run and refresh `reports/`. |
 | `prepare-agent-inputs` | human; `spawn-agents` can reuse its outputs | Prepare HF config and source/cookbook inputs for proposal generation. |
+| `first-pass-loop` | recommended initial proposal entry | Prepare inputs, spawn agents, merge drafts, run `check-proposal`, and run `check-repair-loop` if needed. |
 | `spawn-agents` | human | Generate initial proposal prompts and optionally invoke external agents. |
 | `merge-proposals` | human; `spawn-agents --count > 1` can call it | Merge multiple proposal drafts and record conflicts. |
 | `check-proposal` | read-only check; repair loops call the same gate | Validate proposal artifacts and update `review_checklist.md`. |
@@ -22,6 +23,18 @@ Use this path for a new model. Replace `<hf_model>` and `<model_slug>` with your
 | `promote-approved` | human after review | Copy approved proposal targets and non-FI drafts into reviewed `config/`. |
 
 ### 1. Prepare Inputs
+
+For the usual new-model path, use the unified first-pass command:
+
+```bash
+python3 -B -m flashinfer_bench.onboarding.proposal_tools first-pass-loop \
+  --model <hf_model> \
+  --count 3 \
+  --max-rounds 3 \
+  --agent codex
+```
+
+It stops at a checked merged proposal for human review. It does not promote approved config and does not run Modal.
 
 Prepare the local agent input cache:
 

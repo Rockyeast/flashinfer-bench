@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from .common import *  # noqa: F403
 from .checks.candidate import _check_candidate_fields
-from .checks.drafts import _check_non_fitrace_definition_drafts
+from .checks.drafts import _check_non_fitrace_definition_drafts_with_model
 from .checks.fitrace import _check_run_config, _evaluate_fitrace_targets
 from .checks.merge_report import _check_merge_report
 
@@ -29,9 +29,10 @@ def check_proposal(
         hf_config_path=hf_config_path,
         flashinfer_root=flashinfer_root,
     )
-    definition_drafts = _check_non_fitrace_definition_drafts(
+    definition_drafts = _check_non_fitrace_definition_drafts_with_model(
         proposal_dir=proposal_dir,
         candidates_path=candidates_path,
+        model_slug=hf_config_path.stem,
     )
     merge_report = _check_merge_report(proposal_dir)
     findings = [

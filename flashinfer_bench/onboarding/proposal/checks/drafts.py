@@ -68,7 +68,12 @@ def _check_definition_object(
         findings.append({
             "severity": "error",
             "name": name,
-            "reason": f"definition draft does not match formal Definition schema: {_format_definition_schema_error(exc)}",
+            "reason": (
+                "definition draft does not match formal Definition schema: "
+                f"{_format_definition_schema_error(exc)}. "
+                "Use axes {\"type\":\"var\"} or {\"type\":\"const\",\"value\":N}; "
+                "shape lists must reference axis names, not raw numbers; scalar shape must be null."
+            ),
         })
     return findings
 
@@ -130,7 +135,73 @@ def _check_hint_object(
     return findings
 
 
+def _model_prefixes(model_slug: str | None) -> set[str]:
+    if not model_slug:
+        return set()
+    normalized = re.sub(r"[^a-z0-9]+", "_", model_slug.lower()).strip("_")
+    parts = [part for part in normalized.split("_") if part]
+    prefixes = {normalized}
+    if parts and len(parts[0]) >= 3:
+        prefixes.add(parts[0])
+    for size in range(2, len(parts) + 1):
+        prefixes.add("_".join(parts[:size]))
+    return {prefix for prefix in prefixes if prefix}
+
+
+def _check_definition_name_style(*, name: str, op_type: str, model_slug: str | None) -> list[dict[str, str]]:
+    findings: list[dict[str, str]] = []
+    if not re.fullmatch(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*", name):
+        findings.append({
+            "severity": "error",
+            "name": name,
+            "reason": "definition_name must be lower snake_case with no punctuation",
+        })
+    for prefix in _model_prefixes(model_slug):
+        if name == prefix or name.startswith(f"{prefix}_"):
+            findings.append({
+                "severity": "error",
+                "name": name,
+                "reason": f"definition_name must not include model prefix {prefix!r}; use a stable op/shape name instead",
+            })
+            break
+    if op_type == "rmsnorm":
+        if not re.fullmatch(r"(?:fused_add_)?rmsnorm_h[0-9]+", name):
+            findings.append({
+                "severity": "error",
+                "name": name,
+                "reason": "rmsnorm definition_name must be rmsnorm_h<N> or fused_add_rmsnorm_h<N>",
+            })
+    elif op_type == "silu_and_mul":
+        if not re.fullmatch(r"silu_and_mul_i[0-9]+", name):
+            findings.append({
+                "severity": "error",
+                "name": name,
+                "reason": "silu_and_mul definition_name must be silu_and_mul_i<N>",
+            })
+    elif not (name == op_type or name.startswith(f"{op_type}_")):
+        findings.append({
+            "severity": "warning",
+            "name": name,
+            "reason": f"definition_name should normally start with op_type {op_type!r}",
+        })
+    return findings
+
+
 def _check_non_fitrace_definition_drafts(*, proposal_dir: Path, candidates_path: Path) -> dict[str, Any]:
+    """Check review-only definition/hints drafts for non-fitrace agent targets."""
+    return _check_non_fitrace_definition_drafts_with_model(
+        proposal_dir=proposal_dir,
+        candidates_path=candidates_path,
+        model_slug=None,
+    )
+
+
+def _check_non_fitrace_definition_drafts_with_model(
+    *,
+    proposal_dir: Path,
+    candidates_path: Path,
+    model_slug: str | None,
+) -> dict[str, Any]:
     """Check review-only definition/hints drafts for non-fitrace agent targets."""
     candidates = _load_json(candidates_path)
     if not isinstance(candidates, list):
@@ -162,6 +233,10 @@ def _check_non_fitrace_definition_drafts(*, proposal_dir: Path, candidates_path:
                 "reason": "non-fitrace agent target must declare op_type for draft checking",
             })
             continue
+        findings.extend(
+            {"severity": item["severity"], "name": candidate_name, "reason": item["reason"]}
+            for item in _check_definition_name_style(name=definition_name, op_type=op_type, model_slug=model_slug)
+        )
         definition_path = _definition_draft_path(proposal_dir, op_type, definition_name)
         hints_path = _definition_hint_path(proposal_dir, op_type, definition_name)
         checked.append({

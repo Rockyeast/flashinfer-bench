@@ -6,6 +6,19 @@ from ..common import *  # noqa: F403
 from ..gate import run_proposal_gate
 from .diagnose import diagnose_run
 
+
+def _findings_markdown(items: list[dict[str, Any]], *, source_field: str) -> str:
+    if not items:
+        return ""
+    lines = ["## Findings To Fix", ""]
+    for item in items:
+        lines.append(
+            f"- {item.get('severity', 'unknown')} [{item.get(source_field, 'unknown')}] "
+            f"{item.get('name', 'unknown')}: {item.get('reason', 'unknown')}"
+        )
+    return "\n".join(lines) + "\n\n"
+
+
 def _check_repair_prompt_markdown(
     *,
     proposal_dir: Path,
@@ -21,59 +34,21 @@ def _check_repair_prompt_markdown(
         f"--hf-config {hf_config_path}"
         f"{flashinfer_arg}"
     )
-    lines = [
-        "# Check Repair Prompt",
-        "",
-        "Use the review-onboarding-proposal skill in repair-pass mode to repair this review-only proposal.",
-        "This is a static proposal repair pass before any runtime run.",
-        "",
-        "## Scope",
-        "",
-        f"- proposal_dir: {proposal_dir}",
-        f"- proposal_check: {check_result['outputs']['proposal_check']}",
-        f"- review_checklist: {check_result['outputs']['review_checklist']}",
-        f"- hf_config: {hf_config_path}",
-        f"- flashinfer_root: {flashinfer_root if flashinfer_root is not None else 'not provided'}",
-        "",
-        "## Hard Rules",
-        "",
-        "- Edit only proposal artifacts: proposal/candidate_targets.json, proposal/architecture.md, proposal/review_checklist.md, proposal/definitions, and proposal/definition_hints.",
-        "- Do not edit config/approved_targets.json, config/run_config.json, output/, reports/, or committed source code.",
-        "- Do not approve candidates automatically.",
-        "- Do not run Modal or any GPU job.",
-        "- Fix the proposal so the deterministic checker passes, then stop for human review.",
-        "- If merge_report.json or review_checklist.md reports merge conflicts, read the listed source proposal dirs before editing the merged proposal.",
-        "- When resolving merge conflicts, add or update a `## Manual Conflict Resolution` section in review_checklist.md explaining which source draft was kept and why.",
-        "",
-        "## Current Proposal Check Summary",
-        "",
-        f"- ready_for_human_review: {summary['ready_for_human_review']}",
-        f"- errors: {summary['errors']}",
-        f"- warnings: {summary['warnings']}",
-        "",
-    ]
     findings = check_result.get("check_report", {}).get("findings", [])
-    if findings:
-        lines.extend(["## Findings To Fix", ""])
-        for item in findings:
-            lines.append(
-                f"- {item.get('severity', 'unknown')} [{item.get('check', 'unknown')}] "
-                f"{item.get('name', 'unknown')}: {item.get('reason', 'unknown')}"
-            )
-        lines.append("")
-    lines.extend([
-        "## Required Check",
-        "",
-        "After editing the proposal, run:",
-        "",
-        "```bash",
-        check_cmd,
-        "```",
-        "",
-        "Repeat proposal edits only until `ready for human review: True`, then stop.",
-        "",
-    ])
-    return "\n".join(lines)
+    return _render_prompt_template(
+        "check_repair.md",
+        proposal_dir=proposal_dir,
+        proposal_check=check_result["outputs"]["proposal_check"],
+        review_checklist=check_result["outputs"]["review_checklist"],
+        hf_config=hf_config_path,
+        flashinfer_root=flashinfer_root if flashinfer_root is not None else "not provided",
+        non_fi_definition_rules=_non_fitrace_definition_rules_markdown(),
+        ready_for_human_review=summary["ready_for_human_review"],
+        errors=summary["errors"],
+        warnings=summary["warnings"],
+        findings_block=_findings_markdown(findings, source_field="check"),
+        check_cmd=check_cmd,
+    )
 
 
 def check_repair_loop(
@@ -176,49 +151,11 @@ def _run_repair_prompt_markdown(
         f"--hf-config {hf_config_path}"
         f"{flashinfer_arg}"
     )
-    lines = [
-        "# Repair Prompt",
-        "",
-        "Use the review-onboarding-proposal skill in repair-pass mode to repair this review-only proposal.",
-        "Do not restart initial proposal generation for this run.",
-        "",
-        "## Scope",
-        "",
-        f"- run_dir: {run_dir}",
-        f"- proposal_dir: {proposal_dir}",
-        f"- review_checklist: {proposal_dir / 'review_checklist.md'}",
-        f"- hf_config: {hf_config_path}",
-        f"- flashinfer_root: {flashinfer_root if flashinfer_root is not None else 'not provided'}",
-        "",
-        "## Hard Rules",
-        "",
-        "- This is repair-pass, not initial proposal generation.",
-        "- Edit only proposal artifacts: proposal/candidate_targets.json, proposal/architecture.md, proposal/review_checklist.md, proposal/definitions, and proposal/definition_hints.",
-        "- Do not edit config/approved_targets.json, config/run_config.json, output/, reports/, or committed source code.",
-        "- Do not approve candidates automatically.",
-        "- Do not run Modal or any GPU job.",
-        "- Fix the proposal so the deterministic checker passes, then stop for human review.",
-        "",
-        "## Current Diagnostics Summary",
-        "",
-        f"- status: {'PASS' if summary['ok'] else 'FIX_REQUIRED'}",
-        f"- errors: {summary['errors']}",
-        f"- warnings: {summary['warnings']}",
-        f"- action_required: {summary.get('action_required', 0)}",
-        "",
-    ]
-    findings = diagnostics.get("findings", [])
-    if findings:
-        lines.extend(["## Findings To Fix", ""])
-        for item in findings:
-            lines.append(
-                f"- {item.get('severity', 'unknown')} [{item.get('source', 'unknown')}] "
-                f"{item.get('name', 'unknown')}: {item.get('reason', 'unknown')}"
-            )
-        lines.append("")
+    diagnostic_findings_block = _findings_markdown(diagnostics.get("findings", []), source_field="source")
+    proposal_check_block = ""
     if check_result is not None:
         check_summary = check_result["summary"]
-        lines.extend([
+        proposal_check_block = "\n".join([
             "## Current Proposal Check Summary",
             "",
             f"- ready_for_human_review: {check_summary['ready_for_human_review']}",
@@ -227,19 +164,22 @@ def _run_repair_prompt_markdown(
             f"- review_checklist: {check_result['outputs']['review_checklist']}",
             "",
         ])
-    lines.extend([
-        "## Required Check",
-        "",
-        "After editing the proposal, run:",
-        "",
-        "```bash",
-        check_cmd,
-        "```",
-        "",
-        "Repeat proposal edits only until `ready for human review: True`, then stop.",
-        "",
-    ])
-    return "\n".join(lines)
+    return _render_prompt_template(
+        "run_repair.md",
+        run_dir=run_dir,
+        proposal_dir=proposal_dir,
+        review_checklist=proposal_dir / "review_checklist.md",
+        hf_config=hf_config_path,
+        flashinfer_root=flashinfer_root if flashinfer_root is not None else "not provided",
+        non_fi_definition_rules=_non_fitrace_definition_rules_markdown(),
+        diagnostics_status="PASS" if summary["ok"] else "FIX_REQUIRED",
+        diagnostics_errors=summary["errors"],
+        diagnostics_warnings=summary["warnings"],
+        diagnostics_action_required=summary.get("action_required", 0),
+        diagnostic_findings_block=diagnostic_findings_block,
+        proposal_check_block=proposal_check_block,
+        check_cmd=check_cmd,
+    )
 
 
 def run_repair_loop(
@@ -293,9 +233,17 @@ def run_repair_loop(
         prompt_path.write_text(prompt_text, encoding="utf-8")
 
         diagnostics_ok = bool(diagnostics_result["summary"]["ok"])
+        diagnostics_action_required = int(diagnostics_result["summary"].get("action_required", 0) or 0)
         proposal_ready = bool(check_result["summary"]["ready_for_human_review"])
         ready = bool(diagnostics_ok and proposal_ready)
-        needs_rerun = bool(proposal_ready and not diagnostics_ok)
+        needs_rerun = bool(
+            proposal_ready
+            and not diagnostics_ok
+            and (
+                diagnostics_action_required == 0
+                or bool(agent_rounds)
+            )
+        )
         if ready or needs_rerun or not agent_command or round_index >= max_rounds:
             break
         print(f"[run-repair-loop] round {round_index}/{max_rounds}: invoking agent ...", flush=True)
@@ -322,17 +270,26 @@ def run_repair_loop(
         raise RuntimeError("repair loop did not run proposal check")
     check_summary = check_result["summary"]
     diagnostics_ok = bool(diagnostics_result["summary"]["ok"])
+    diagnostics_action_required = int(diagnostics_result["summary"].get("action_required", 0) or 0)
     proposal_ready = bool(check_result["summary"]["ready_for_human_review"])
     ready_for_human_review = bool(
         diagnostics_ok
         and proposal_ready
     )
+    needs_rerun = bool(
+        proposal_ready
+        and not diagnostics_ok
+        and (
+            diagnostics_action_required == 0
+            or bool(agent_rounds)
+        )
+    )
     result = {
         "summary": {
             "diagnostics_ok": diagnostics_ok,
             "proposal_ready": proposal_ready,
-            "needs_rerun": bool(proposal_ready and not diagnostics_ok),
-            "diagnostics_action_required": diagnostics_result["summary"].get("action_required", 0),
+            "needs_rerun": needs_rerun,
+            "diagnostics_action_required": diagnostics_action_required,
             "ready_for_human_review": ready_for_human_review,
             "errors": check_summary["errors"],
             "warnings": check_summary["warnings"],

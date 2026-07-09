@@ -50,7 +50,7 @@ from flashinfer_bench.onboarding.proposal.gate import check_proposal, run_propos
 from flashinfer_bench.onboarding.proposal.workflow.diagnose import diagnose_run
 from flashinfer_bench.onboarding.proposal.workflow.merge import merge_proposals
 from flashinfer_bench.onboarding.proposal.workflow.prepare import slug_model_name
-from flashinfer_bench.onboarding.proposal.workflow.repair import repair_loop
+from flashinfer_bench.onboarding.proposal.workflow.repair import run_repair_loop
 from flashinfer_bench.onboarding.proposal.workflow.spawn import spawn_agents
 from flashinfer_bench.onboarding.core.schemas import ApprovedTarget, CaptureSpec, CollectPlan, CollectTarget, DefinitionRef, DispatchSpec, ProbePlan, ProbeTarget, WarmupHook
 

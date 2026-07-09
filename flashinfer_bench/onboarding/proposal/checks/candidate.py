@@ -32,6 +32,7 @@ def _check_candidate_fields(path: Path) -> dict[str, Any]:
         module = item.get("module")
         attr = item.get("attr")
         collect = item.get("collect", False)
+        effective_collect = True if status == "approved" else collect
         definition_source = item.get("definition_source", "unknown")
         definition_name = item.get("definition_name")
         op_type = item.get("op_type")
@@ -122,12 +123,6 @@ def _check_candidate_fields(path: Path) -> dict[str, Any]:
             })
 
         if status == "approved":
-            if collect is not True:
-                findings.append({
-                    "severity": "error",
-                    "name": name,
-                    "reason": "approved target must use collect=true",
-                })
             if not isinstance(target, str) or not target:
                 findings.append({
                     "severity": "error",
@@ -165,7 +160,7 @@ def _check_candidate_fields(path: Path) -> dict[str, Any]:
             and isinstance(op_type, str)
             and op_type in KNOWN_NON_FITRACE_COLLECTABLE_OPS
         ):
-            if collect is not True:
+            if effective_collect is not True:
                 findings.append({
                     "severity": "error",
                     "name": name,
@@ -177,7 +172,7 @@ def _check_candidate_fields(path: Path) -> dict[str, Any]:
                     "name": name,
                     "reason": f"known non-FlashInfer op {op_type} must use definition_source=agent",
                 })
-        if backend != "flashinfer" and collect is True:
+        if backend != "flashinfer" and effective_collect is True:
             if not isinstance(definition_name, str) or not definition_name:
                 findings.append({
                     "severity": "error",
@@ -197,7 +192,7 @@ def _check_candidate_fields(path: Path) -> dict[str, Any]:
                     "name": name,
                     "reason": "non-FlashInfer collect target should include source evidence for reviewed definition/hints",
                 })
-        if backend == "flashinfer" and collect is True:
+        if backend == "flashinfer" and effective_collect is True:
             if status == "approved" and definition_source not in {"fitrace", "manual"}:
                 findings.append({
                     "severity": "error",
