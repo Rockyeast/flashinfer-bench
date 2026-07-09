@@ -97,7 +97,9 @@ def update_run_report(run_dir: Path, **sections: Any) -> dict[str, Any]:
     report.setdefault("version", 1)
     report["run_dir"] = str(run_dir)
     for key, value in sections.items():
-        if value is not None:
+        if value is None:
+            report.pop(key, None)
+        else:
             report[key] = value
 
     internal = report.get("internal_validation") if isinstance(report.get("internal_validation"), dict) else {}
@@ -317,7 +319,6 @@ def export_run_dataset(
 
     copied_definitions: list[dict[str, str]] = []
     missing_definitions: list[dict[str, str]] = []
-    referenced_definition_paths: set[Path] = set()
     for target in collect_plan.get("targets", []):
         if not isinstance(target, dict):
             continue
@@ -331,7 +332,6 @@ def export_run_dataset(
         if not src.exists():
             missing_definitions.append({"name": definition_name, "path": str(src)})
             continue
-        referenced_definition_paths.add(dst.resolve())
         dst.parent.mkdir(parents=True, exist_ok=True)
         if src.resolve() != dst.resolve():
             if dst.exists() and not overwrite:
@@ -341,19 +341,6 @@ def export_run_dataset(
         copied_definitions.append({"name": definition_name, "source": str(src), "destination": str(dst)})
 
     pruned_definitions: list[str] = []
-    definitions_root = output_dir / "definitions"
-    if same_root and definitions_root.exists():
-        for path in sorted(definitions_root.rglob("*.json")):
-            if path.resolve() in referenced_definition_paths:
-                continue
-            pruned_definitions.append(str(path))
-            path.unlink()
-        for path in sorted(definitions_root.rglob("*"), reverse=True):
-            if path.is_dir():
-                try:
-                    path.rmdir()
-                except OSError:
-                    pass
 
     copied_dirs: list[dict[str, str]] = []
     for dirname in ("workloads", "blob"):
@@ -562,6 +549,7 @@ def _build_dataset_validate_command(
     outputs: str,
     output_folder: Path | None,
     disable_gpu: bool,
+    definitions: list[str] | None = None,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -577,6 +565,8 @@ def _build_dataset_validate_command(
     ]
     if disable_gpu:
         command.append("--disable-gpu")
+    if definitions:
+        command.extend(["--definitions", *definitions])
     if output_folder is not None:
         command.extend(["--output-folder", str(output_folder)])
     return command
@@ -588,6 +578,7 @@ def run_dataset_validator(
     checks: str = "layout,definition,workload",
     outputs: str = "stdout",
     disable_gpu: bool = True,
+    definitions: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run the flashinfer-bench dataset validator and return a report."""
     try:
@@ -615,6 +606,7 @@ def run_dataset_validator(
             outputs=outputs,
             output_folder=None,
             disable_gpu=disable_gpu,
+            definitions=definitions,
         )
         env = os.environ.copy()
         env["XDG_CACHE_HOME"] = str(cache_root)
@@ -631,6 +623,7 @@ def run_dataset_validator(
         "checks": checks,
         "outputs": outputs,
         "disable_gpu": disable_gpu,
+        "definitions": definitions or [],
         "returncode": result.returncode,
         "ok": result.returncode == 0 and not output_has_errors,
         "stdout": result.stdout,

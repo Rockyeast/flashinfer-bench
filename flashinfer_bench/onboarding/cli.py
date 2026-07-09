@@ -15,6 +15,7 @@ from flashinfer_bench.onboarding.core.probe_planning import (
     build_probe_plan,
     load_approved_targets,
 )
+from flashinfer_bench.onboarding.proposal.workflow.promote import promoted_config_sync_errors
 from flashinfer_bench.onboarding.validation import (
     export_run_dataset,
     run_dataset_validator,
@@ -259,6 +260,39 @@ def _build_internal_validation(
     )
 
 
+def _export_and_validate_dataset(run_dir: Path) -> tuple[dict, dict]:
+    update_run_report(run_dir, dataset_validation=None)
+    export_report = export_run_dataset(
+        run_dir=run_dir,
+        output_dir=_run_output_dir(run_dir),
+        overwrite=False,
+    )
+    update_run_report(run_dir, export=export_report)
+    export_summary = export_report["summary"]
+    print(f"dataset: {export_report['dataset_dir']}")
+    print(f"definitions: {export_summary['definitions']}")
+    print(f"missing definitions: {export_summary['missing_definitions']}")
+    if not export_summary["ok"]:
+        return export_report, {"ok": False, "returncode": None}
+
+    definition_names = [
+        str(item["name"])
+        for item in export_report.get("definitions", [])
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    ]
+    dataset_report = run_dataset_validator(
+        dataset_dir=_run_output_dir(run_dir),
+        checks="layout,definition,workload",
+        outputs="stdout",
+        disable_gpu=True,
+        definitions=definition_names,
+    )
+    update_run_report(run_dir, dataset_validation=dataset_report)
+    print(f"dataset validation ok: {dataset_report['ok']}")
+    print(f"returncode: {dataset_report['returncode']}")
+    return export_report, dataset_report
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI parser."""
     parser = argparse.ArgumentParser(description="Minimal FlashInfer trace core")
@@ -279,6 +313,18 @@ def main(argv: list[str] | None = None) -> int:
         approved_targets = _run_config_dir(run_dir) / "approved_targets.json"
         if not approved_targets.exists():
             raise SystemExit(f"ERROR: approved targets not found: {approved_targets}")
+        sync_errors = promoted_config_sync_errors(
+            proposal_dir=run_dir / "proposal",
+            config_dir=_run_config_dir(run_dir),
+        )
+        if sync_errors:
+            details = "\n".join(f"- {error}" for error in sync_errors)
+            raise SystemExit(
+                "ERROR: config is out of sync with proposal. "
+                "Run `python3 -B -m flashinfer_bench.onboarding.proposal_tools "
+                f"promote-approved --run {run_dir.relative_to('runs')}` first.\n"
+                f"{details}"
+            )
 
         model_name = _required_config_value(args, config, "model_name", "--model-name")
         definitions_dir = _run_output_dir(run_dir) / "definitions"
@@ -376,6 +422,9 @@ def main(argv: list[str] | None = None) -> int:
             remote=remote_report,
             parse_report=parse_report,
             collect={"plan": collect_plan, "manifest": manifest},
+            internal_validation=None,
+            export=None,
+            dataset_validation=None,
         )
         definition_audit = modal_result.get("definition_audit_report")
         if isinstance(definition_audit, dict):
@@ -401,7 +450,14 @@ def main(argv: list[str] | None = None) -> int:
         run_report_path, run_review_path = _run_report_paths(run_dir)
         print(f"run report: {run_report_path}")
         print(f"review: {run_review_path}")
-        return 0 if validate_summary["ok"] else 1
+        if not validate_summary["ok"]:
+            print("run accepted: False")
+            return 1
+
+        export_report, dataset_report = _export_and_validate_dataset(run_dir)
+        print(f"run report: {run_report_path}")
+        print(f"run accepted: {dataset_report['ok']}")
+        return 0 if dataset_report["ok"] else 1
 
     if args.command == "validate":
         run_dir = _run_dir_from_name(args.run)
@@ -419,7 +475,7 @@ def main(argv: list[str] | None = None) -> int:
             workload_manifest_path=None,
             workload_manifest=workload_manifest,
         )
-        update_run_report(run_dir, internal_validation=report)
+        update_run_report(run_dir, internal_validation=report, export=None, dataset_validation=None)
         internal_summary = report["summary"]
         print(f"internal validation ok: {internal_summary['ok']}")
         print(f"errors: {internal_summary['errors']}")
@@ -431,29 +487,11 @@ def main(argv: list[str] | None = None) -> int:
             print("run accepted: False")
             return 1
 
-        export_report = export_run_dataset(
-            run_dir=run_dir,
-            output_dir=_run_output_dir(run_dir),
-            overwrite=False,
-        )
-        update_run_report(run_dir, export=export_report)
+        export_report, dataset_report = _export_and_validate_dataset(run_dir)
         export_summary = export_report["summary"]
-        print(f"dataset: {export_report['dataset_dir']}")
-        print(f"definitions: {export_summary['definitions']}")
-        print(f"missing definitions: {export_summary['missing_definitions']}")
         if not export_summary["ok"]:
             print("run accepted: False")
             return 1
-
-        dataset_report = run_dataset_validator(
-            dataset_dir=_run_output_dir(run_dir),
-            checks="layout,definition,workload",
-            outputs="stdout",
-            disable_gpu=True,
-        )
-        update_run_report(run_dir, dataset_validation=dataset_report)
-        print(f"dataset validation ok: {dataset_report['ok']}")
-        print(f"returncode: {dataset_report['returncode']}")
         print(f"run report: {run_report_path}")
         print(f"run accepted: {dataset_report['ok']}")
         return 0 if dataset_report["ok"] else 1

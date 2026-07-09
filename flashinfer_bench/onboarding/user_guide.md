@@ -13,7 +13,7 @@ Use this path for a new model. Replace `<hf_model>` and `<model_slug>` with your
 | `run` | human main entry | Run the reviewed runtime pipeline from `config/` and write `output/` + `reports/`. |
 | `validate` | human follow-up | Re-check an existing run and refresh `reports/`. |
 | `prepare-agent-inputs` | human; `spawn-agents` can reuse its outputs | Prepare HF config and source/cookbook inputs for proposal generation. |
-| `spawn-agents` | human | Generate first-pass proposal prompts and optionally invoke external agents. |
+| `spawn-agents` | human | Generate initial proposal prompts and optionally invoke external agents. |
 | `merge-proposals` | human; `spawn-agents --count > 1` can call it | Merge multiple proposal drafts and record conflicts. |
 | `check-proposal` | read-only check; repair loops call the same gate | Validate proposal artifacts and update `review_checklist.md`. |
 | `check-repair-loop` | common pre-run repair command | Run static proposal check, generate `check_repair_prompt.md` on failure, optionally invoke an agent, then re-check. |
@@ -72,7 +72,7 @@ python3 -B -m flashinfer_bench.onboarding.proposal_tools spawn-agents \
   --agent codex
 ```
 
-`spawn-agents` writes each agent's prompt/run under `runs/<model>/<date>_firstpass...`. With `--count > 1`, it creates sibling agent runs and merges proposals into a review-only merged proposal.
+`spawn-agents` writes each agent's prompt/run under `runs/<model>/<date>...`. With `--count > 1`, it creates sibling agent runs and merges proposals into a review-only merged proposal.
 
 This stage may leave these files. `spawn-agents` writes the prompt file; when an external agent command fails, its stdout/stderr are printed to the current terminal instead of being stored under `proposal/`.
 
@@ -80,16 +80,18 @@ This stage may leave these files. `spawn-agents` writes the prompt file; when an
 runs/<model>/<run_id>/
   proposal/
     architecture.md
-    first_pass_prompt.md
     candidate_targets.json
     review_checklist.md
+    proposal_check.json
+    agent_artifacts/
+      first_pass_prompt.md
     definitions/
     definition_hints/
   config/
     run_config.json
 ```
 
-The agent is expected to run `check-proposal` until the proposal is ready for human review.
+Each spawned agent writes an initial draft and may run `check-proposal` once to leave status. Do not rely on per-agent self-repair; after merge, use `check-repair-loop` to repair the merged proposal.
 
 ### 3. Review And Approve
 
@@ -244,7 +246,6 @@ runs/<model>/<run_id>/
     architecture.md
     candidate_targets.json
     review_checklist.md
-    merge_review.md
     merge_report.json
     agent_artifacts/
       first_pass_prompt.md
@@ -329,7 +330,7 @@ python3 -B -m flashinfer_bench.onboarding.proposal_tools merge-proposals \
   --output-dir runs/<model>/<merged_run>/proposal
 ```
 
-`merge-proposals` deduplicates candidates and unions evidence. Conflicts are written to `merge_review.md` and `merge_report.json`; they must be resolved by review.
+`merge-proposals` deduplicates candidates, unions evidence, copies identical `config/run_config.json` into the merged run, and records conflicts in `merge_report.json` and summarizes them in `review_checklist.md`. Conflicts must be resolved by review before promotion or runtime.
 
 ### Result Artifacts
 

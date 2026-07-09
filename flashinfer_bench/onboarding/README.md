@@ -74,7 +74,7 @@ See `user_guide.md` for the full command reference, run directory layout, and tr
 - `runners/`: Modal/SGLang runner integration.
 - `cli.py`: command-line entrypoints for collect and validation.
 - `proposal_tools.py`: proposal checks, multi-agent merge, diagnostics, and repair-loop helpers.
-- `.claude/skills/review-onboarding-proposal/`: agent skill for first-pass and repair-pass proposal generation.
+- `.claude/skills/review-onboarding-proposal/`: agent skill for initial and repair-pass proposal generation.
 - `tests/onboarding/`: unit tests for the onboarding workflow.
 
 Runtime inputs are explicit reviewed files. The onboarding runtime does not infer model runtime settings from model names, hidden defaults, or legacy external definition directories.

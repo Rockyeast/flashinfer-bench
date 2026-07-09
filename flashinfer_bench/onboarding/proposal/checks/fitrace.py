@@ -400,16 +400,16 @@ def _evaluate_fitrace_targets(
         result["fitrace_ok"] = has_fi_trace or bool(source_result["source_fitrace_ok"])
         if not result["fitrace_ok"]:
             reason = (
-                "target is importable but has no callable .fi_trace"
+                "local target is importable but has no callable .fi_trace"
                 if error is None
-                else f"target cannot be imported and source check failed: {error}; {source_result['source_error']}"
+                else f"local target cannot be imported and source check failed: {error}; {source_result['source_error']}"
             )
             if source_result.get("suggested_target"):
-                reason = f"{reason}; suggested fitrace target: {source_result['suggested_target']}"
+                reason = f"{reason}; suggested trace target: {source_result['suggested_target']}"
             findings.append({
-                "severity": "error",
+                "severity": "warning",
                 "name": name,
-                "reason": f"{reason}; final definition cannot come from fitrace",
+                "reason": f"{reason}; verify remote tracing output after run",
             })
 
         if item.get("backend") != "flashinfer":

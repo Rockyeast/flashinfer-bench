@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from flashinfer_bench.data.definition import Definition
+
 from ..common import *  # noqa: F403
 
 def _definition_draft_path(proposal_dir: Path, op_type: str, definition_name: str) -> Path:
@@ -60,7 +62,36 @@ def _check_definition_object(
         findings.append({"severity": "error", "name": name, "reason": "definition draft reference must be a non-empty string"})
     elif not _reference_has_top_level_run(reference):
         findings.append({"severity": "error", "name": name, "reason": "definition draft reference must define top-level run(...)"})
+    try:
+        Definition.model_validate(data)
+    except Exception as exc:  # noqa: BLE001 - surface pydantic schema errors to the agent
+        findings.append({
+            "severity": "error",
+            "name": name,
+            "reason": f"definition draft does not match formal Definition schema: {_format_definition_schema_error(exc)}",
+        })
     return findings
+
+
+def _format_definition_schema_error(exc: Exception) -> str:
+    errors = getattr(exc, "errors", None)
+    if callable(errors):
+        try:
+            items = errors()
+        except Exception:  # noqa: BLE001 - fall back to string form
+            items = None
+        if isinstance(items, list) and items:
+            parts: list[str] = []
+            for item in items[:3]:
+                if not isinstance(item, dict):
+                    continue
+                loc = ".".join(str(part) for part in item.get("loc", ()))
+                msg = str(item.get("msg") or "invalid")
+                parts.append(f"{loc}: {msg}" if loc else msg)
+            if parts:
+                suffix = f"; +{len(items) - len(parts)} more" if len(items) > len(parts) else ""
+                return "; ".join(parts) + suffix
+    return str(exc).splitlines()[0]
 
 
 def _reference_has_top_level_run(reference: str) -> bool:

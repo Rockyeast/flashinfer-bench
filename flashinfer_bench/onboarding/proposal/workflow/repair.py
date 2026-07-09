@@ -42,6 +42,8 @@ def _check_repair_prompt_markdown(
         "- Do not approve candidates automatically.",
         "- Do not run Modal or any GPU job.",
         "- Fix the proposal so the deterministic checker passes, then stop for human review.",
+        "- If merge_report.json or review_checklist.md reports merge conflicts, read the listed source proposal dirs before editing the merged proposal.",
+        "- When resolving merge conflicts, add or update a `## Manual Conflict Resolution` section in review_checklist.md explaining which source draft was kept and why.",
         "",
         "## Current Proposal Check Summary",
         "",
@@ -80,6 +82,7 @@ def check_repair_loop(
     hf_config_path: Path,
     flashinfer_root: Path | None = None,
     agent_command: list[str] | None = None,
+    agent_env: dict[str, str] | None = None,
     max_rounds: int = 1,
 ) -> dict[str, Any]:
     """Repair static proposal check failures before any runtime run."""
@@ -117,6 +120,7 @@ def check_repair_loop(
             check=False,
             text=True,
             input=prompt_text,
+            env=agent_env,
         )
         print(f"[check-repair-loop] round {round_index}/{max_rounds}: agent exited (returncode={completed.returncode})", flush=True)
         agent_rounds.append({
@@ -176,7 +180,7 @@ def _run_repair_prompt_markdown(
         "# Repair Prompt",
         "",
         "Use the review-onboarding-proposal skill in repair-pass mode to repair this review-only proposal.",
-        "Do not restart first-pass onboarding for this run.",
+        "Do not restart initial proposal generation for this run.",
         "",
         "## Scope",
         "",
@@ -188,7 +192,7 @@ def _run_repair_prompt_markdown(
         "",
         "## Hard Rules",
         "",
-        "- This is repair-pass, not first-pass.",
+        "- This is repair-pass, not initial proposal generation.",
         "- Edit only proposal artifacts: proposal/candidate_targets.json, proposal/architecture.md, proposal/review_checklist.md, proposal/definitions, and proposal/definition_hints.",
         "- Do not edit config/approved_targets.json, config/run_config.json, output/, reports/, or committed source code.",
         "- Do not approve candidates automatically.",
@@ -244,6 +248,7 @@ def run_repair_loop(
     hf_config_path: Path,
     flashinfer_root: Path | None = None,
     agent_command: list[str] | None = None,
+    agent_env: dict[str, str] | None = None,
     max_rounds: int = 1,
 ) -> dict[str, Any]:
     """Generate repair prompts and optionally drive an external agent.
@@ -270,14 +275,12 @@ def run_repair_loop(
         diagnostics_result = diagnose_run(run=run_dir)
         diagnostics = diagnostics_result["diagnostics"]
 
-        check_result = None
-        if diagnostics_result["summary"]["ok"]:
-            print(f"[run-repair-loop] round {round_index}/{max_rounds}: diagnostics ok, running proposal check ...", flush=True)
-            check_result = run_proposal_gate(
-                proposal_dir=proposal_dir,
-                hf_config_path=hf_config_path,
-                flashinfer_root=flashinfer_root,
-            )
+        print(f"[run-repair-loop] round {round_index}/{max_rounds}: running proposal check ...", flush=True)
+        check_result = run_proposal_gate(
+            proposal_dir=proposal_dir,
+            hf_config_path=hf_config_path,
+            flashinfer_root=flashinfer_root,
+        )
 
         prompt_text = _run_repair_prompt_markdown(
             run_dir=run_dir,
@@ -289,12 +292,11 @@ def run_repair_loop(
         )
         prompt_path.write_text(prompt_text, encoding="utf-8")
 
-        ready = bool(
-            diagnostics_result["summary"]["ok"]
-            and check_result
-            and check_result["summary"]["ready_for_human_review"]
-        )
-        if ready or not agent_command or round_index >= max_rounds:
+        diagnostics_ok = bool(diagnostics_result["summary"]["ok"])
+        proposal_ready = bool(check_result["summary"]["ready_for_human_review"])
+        ready = bool(diagnostics_ok and proposal_ready)
+        needs_rerun = bool(proposal_ready and not diagnostics_ok)
+        if ready or needs_rerun or not agent_command or round_index >= max_rounds:
             break
         print(f"[run-repair-loop] round {round_index}/{max_rounds}: invoking agent ...", flush=True)
         completed = subprocess.run(
@@ -302,6 +304,7 @@ def run_repair_loop(
             check=False,
             text=True,
             input=prompt_text,
+            env=agent_env,
         )
         print(f"[run-repair-loop] round {round_index}/{max_rounds}: agent exited (returncode={completed.returncode})", flush=True)
         agent_round = {
@@ -315,15 +318,20 @@ def run_repair_loop(
 
     if diagnostics_result is None:
         raise RuntimeError("repair loop did not run")
-    check_summary = check_result["summary"] if check_result else diagnostics_result["summary"]
+    if check_result is None:
+        raise RuntimeError("repair loop did not run proposal check")
+    check_summary = check_result["summary"]
+    diagnostics_ok = bool(diagnostics_result["summary"]["ok"])
+    proposal_ready = bool(check_result["summary"]["ready_for_human_review"])
     ready_for_human_review = bool(
-        diagnostics_result["summary"]["ok"]
-        and check_result
-        and check_result["summary"]["ready_for_human_review"]
+        diagnostics_ok
+        and proposal_ready
     )
     result = {
         "summary": {
-            "diagnostics_ok": diagnostics_result["summary"]["ok"],
+            "diagnostics_ok": diagnostics_ok,
+            "proposal_ready": proposal_ready,
+            "needs_rerun": bool(proposal_ready and not diagnostics_ok),
             "diagnostics_action_required": diagnostics_result["summary"].get("action_required", 0),
             "ready_for_human_review": ready_for_human_review,
             "errors": check_summary["errors"],
@@ -335,6 +343,7 @@ def run_repair_loop(
         "run_dir": str(run_dir),
         "outputs": {
             "review_checklist": diagnostics_result["outputs"]["review_checklist"],
+            "proposal_check": check_result["outputs"]["proposal_check"],
             "run_repair_prompt": str(prompt_path),
         },
         "agent": agent_rounds[-1] if agent_rounds else None,

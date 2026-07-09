@@ -1,4 +1,4 @@
-"""Generate first-pass prompts and optionally run external agents."""
+"""Generate initial proposal prompts and optionally run external agents."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def first_pass_prompt_markdown(
     cookbook_root: Path,
     sglang_model_hints: list[str],
 ) -> str:
-    """Return the fixed first-pass prompt for one review-only agent run."""
+    """Return the fixed initial prompt for one review-only agent run."""
     proposal_dir = run_dir / "proposal"
     hints = "\n".join(f"  - {item}" for item in sglang_model_hints) if sglang_model_hints else "  - none provided"
     runtime_guidance: list[str] = []
@@ -49,7 +49,7 @@ def first_pass_prompt_markdown(
                 "",
             ])
     return "\n".join([
-        f"# {model_name} First-Pass Proposal",
+        f"# {model_name} Initial Proposal Draft",
         "",
         "Use the `review-onboarding-proposal` skill to generate a review-only proposal for:",
         "",
@@ -72,7 +72,7 @@ def first_pass_prompt_markdown(
         hints,
         f"FlashInfer source root: {_display_path(flashinfer_root)}",
         f"sgl-cookbook root: {_display_path(cookbook_root)}",
-        "diagnostics: omit; first-pass",
+        "diagnostics: omit; initial draft",
         f"run dir: {_display_path(run_dir)}",
         "```",
         "",
@@ -94,7 +94,7 @@ def first_pass_prompt_markdown(
         "Do not write runtime `output/definitions`, `output/workloads`, or `output/blob`.",
         "Do not run Modal, collect, validate, or commit.",
         "",
-        "After writing the proposal, run:",
+        "After writing the proposal, run the deterministic check once and leave the result in the proposal status files:",
         "",
         "```bash",
         "python3 -B -m flashinfer_bench.onboarding.proposal_tools check-proposal \\",
@@ -103,12 +103,9 @@ def first_pass_prompt_markdown(
         f"  --flashinfer-root {_display_path(flashinfer_root)}",
         "```",
         "",
-        "If the `review_checklist.md` tool status reports `FIX_REQUIRED`, revise only the review-only",
-        "proposal bundle and repeat the same deterministic check until it prints:",
-        "",
-        "```text",
-        "ready for human review: True",
-        "```",
+        "Do not run a self-repair loop here. If this first draft is still `FIX_REQUIRED`, leave the",
+        "check result in `proposal_check.json` / `review_checklist.md`; the merged proposal will be repaired",
+        "later through `check-repair-loop`.",
         "",
     ])
 
@@ -128,7 +125,7 @@ def spawn_agents(
     merge_output_dir: Path | None = None,
     progress: bool = False,
 ) -> dict[str, Any]:
-    """Generate first-pass prompts and optionally run N external agents."""
+    """Generate initial proposal prompts and optionally run N external agents."""
     if count < 1:
         raise ValueError("count must be >= 1")
     run_base = _resolve_run_dir(run_prefix)

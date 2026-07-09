@@ -77,8 +77,13 @@ def _add_check_repair_loop_parser(subparsers: argparse._SubParsersAction) -> Non
     parser.add_argument(
         "--max-rounds",
         type=int,
-        default=1,
+        default=3,
         help="Maximum check/repair rounds when --agent-command is provided.",
+    )
+    parser.add_argument(
+        "--agent",
+        choices=["codex"],
+        help="Shortcut external agent command. Currently supports codex.",
     )
     parser.add_argument(
         "--agent-command",
@@ -102,8 +107,13 @@ def _add_run_repair_loop_parser(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "--max-rounds",
         type=int,
-        default=1,
+        default=3,
         help="Maximum run repair/check rounds when --agent-command is provided.",
+    )
+    parser.add_argument(
+        "--agent",
+        choices=["codex"],
+        help="Shortcut external agent command. Currently supports codex.",
     )
     parser.add_argument(
         "--agent-command",
@@ -115,14 +125,14 @@ def _add_run_repair_loop_parser(subparsers: argparse._SubParsersAction) -> None:
 def _add_spawn_agents_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         "spawn-agents",
-        help="Generate first-pass proposal prompts and optionally run N external agents.",
+        help="Generate initial proposal prompts and optionally run N external agents.",
     )
     parser.add_argument("--model", required=True, help="HF model name, for example microsoft/Phi-4-mini-instruct.")
     parser.add_argument(
         "--run-prefix",
         type=Path,
         help=(
-            "Base run path or path relative to runs/. Defaults to <model_slug>/<YYYYMMDD>_firstpass. "
+            "Base run path or path relative to runs/. Defaults to <model_slug>/<YYYYMMDD>. "
             "With --count 1 this exact run is used; "
             "with --count N, sibling runs ending in _agent_a/_agent_b/... are used."
         ),
@@ -137,7 +147,7 @@ def _add_spawn_agents_parser(subparsers: argparse._SubParsersAction) -> None:
         default=[],
         help="Relative SGLang source hint. Can be passed multiple times.",
     )
-    parser.add_argument("--count", type=int, default=1, help="Number of first-pass agents/prompts. Defaults to 1.")
+    parser.add_argument("--count", type=int, default=1, help="Number of initial proposal agents/prompts. Defaults to 1.")
     parser.add_argument(
         "--merge-output-dir",
         type=Path,
@@ -248,11 +258,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if summary["ok"] else 1
 
     if args.command == "check-repair-loop":
+        agent_command = args.agent_command
+        agent_env = None
+        if agent_command is None:
+            agent_command, agent_env = _agent_command_from_shortcut(args.agent)
         result = check_repair_loop(
             proposal_dir=args.proposal_dir,
             hf_config_path=args.hf_config,
             flashinfer_root=args.flashinfer_root,
-            agent_command=args.agent_command,
+            agent_command=agent_command,
+            agent_env=agent_env,
             max_rounds=args.max_rounds,
         )
         summary = result["summary"]
@@ -264,19 +279,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"proposal check: {result['outputs']['proposal_check']}")
         print(f"review checklist: {result['outputs']['review_checklist']}")
         print(f"check repair prompt: {result['outputs']['check_repair_prompt']}")
-        return 0 if summary["ready_for_human_review"] else 1
+        return 0 if summary["ready_for_human_review"] or summary.get("needs_rerun", False) else 1
 
     if args.command == "run-repair-loop":
+        agent_command = args.agent_command
+        agent_env = None
+        if agent_command is None:
+            agent_command, agent_env = _agent_command_from_shortcut(args.agent)
         result = run_repair_loop(
             run=args.run,
             hf_config_path=args.hf_config,
             flashinfer_root=args.flashinfer_root,
-            agent_command=args.agent_command,
+            agent_command=agent_command,
+            agent_env=agent_env,
             max_rounds=args.max_rounds,
         )
         summary = result["summary"]
         print(f"diagnostics ok: {summary['diagnostics_ok']}")
         print(f"diagnostics action_required: {summary.get('diagnostics_action_required', 0)}")
+        print(f"proposal ready: {summary.get('proposal_ready', False)}")
+        print(f"needs rerun: {summary.get('needs_rerun', False)}")
         print(f"ready for human review: {summary['ready_for_human_review']}")
         print(f"errors: {summary['errors']}")
         print(f"warnings: {summary['warnings']}")
@@ -319,7 +341,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"prompt: {item['prompt']}")
         if result["merge_report"]:
             print(f"merge report: {result['merge_report']}")
-        print(f"report: {result['report']}")
         ok = summary["agent_failures"] == 0
         if summary["merge_ok"] is not None:
             ok = ok and bool(summary["merge_ok"])
@@ -336,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"candidate conflicts: {summary['candidate_conflicts']}")
         print(f"draft file conflicts: {summary['draft_file_conflicts']}")
         print(f"output: {args.output_dir}")
-        print(f"review: {args.output_dir / 'merge_review.md'}")
+        print(f"review checklist: {args.output_dir / 'review_checklist.md'}")
         print(f"report: {args.output_dir / 'merge_report.json'}")
         return 0 if summary["ok"] else 1
 

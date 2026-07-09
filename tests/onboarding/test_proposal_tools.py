@@ -203,7 +203,7 @@ def test_merge_proposals_unions_candidates_and_evidence(tmp_path: Path) -> None:
     ]
     assert "agent a note" in decode["review_note"]
     assert "agent b note" in decode["review_note"]
-    assert (output / "merge_review.md").exists()
+    assert (output / "review_checklist.md").exists()
 
 def test_merge_proposals_reports_candidate_conflicts(tmp_path: Path) -> None:
     proposal_a = tmp_path / "agent_a" / "proposal"
@@ -237,8 +237,8 @@ def test_merge_proposals_reports_candidate_conflicts(tmp_path: Path) -> None:
     assert report["conflicts"][0]["fields"] == ["collect"]
     merged = json.loads((output / "candidate_targets.json").read_text(encoding="utf-8"))
     assert merged == []
-    review = (output / "merge_review.md").read_text(encoding="utf-8")
-    assert "conflicting candidate fields" in review
+    checklist = (output / "review_checklist.md").read_text(encoding="utf-8")
+    assert "conflicting candidate fields" in checklist
 
 def test_repair_loop_passes_prompt_to_agent_stdin_and_rechecks(tmp_path: Path) -> None:
     run_dir = tmp_path / "runs" / "model" / "run"

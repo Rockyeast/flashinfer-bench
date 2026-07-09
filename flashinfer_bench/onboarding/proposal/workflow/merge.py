@@ -21,11 +21,14 @@ def _candidate_merge_key(item: dict[str, Any]) -> tuple[Any, ...]:
     attr = item.get("attr")
     target = item.get("target")
     hook_key = ("module_attr", module, attr) if module and attr else ("target", target)
+    definition_source = item.get("definition_source")
+    if item.get("backend") == "flashinfer" or item.get("collect") is False:
+        definition_source = None
     return (
         "target",
         tuple(key_value(value) for value in hook_key),
         key_value(item.get("backend")),
-        key_value(item.get("definition_source")),
+        key_value(definition_source),
         key_value(item.get("op_type")),
         key_value(item.get("variant")),
         key_value(item.get("definition_name")),
@@ -40,6 +43,19 @@ def _candidate_core(item: dict[str, Any]) -> dict[str, Any]:
         for key, value in item.items()
         if key not in CANDIDATE_MERGE_META_FIELDS
     }
+
+
+def _candidate_merge_core(item: dict[str, Any]) -> dict[str, Any]:
+    core = _candidate_core(item)
+    if item.get("backend") == "flashinfer" or item.get("collect") is False:
+        core.pop("definition_source", None)
+    return core
+
+
+def _candidate_rank(item: dict[str, Any]) -> tuple[int, int]:
+    status_rank = 1 if item.get("status") == "approved" else 0
+    source_rank = 1 if item.get("definition_source") not in {None, "unknown"} else 0
+    return status_rank, source_rank
 
 
 def _unique_json_values(values: list[Any]) -> list[Any]:
@@ -66,8 +82,8 @@ def _candidate_conflict_fields(items: list[dict[str, Any]]) -> list[str]:
 
 def _merge_candidate_group(entries: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     candidates = [entry["candidate"] for entry in entries]
-    first_core = _candidate_core(candidates[0])
-    if any(_candidate_core(candidate) != first_core for candidate in candidates[1:]):
+    first_core = _candidate_merge_core(candidates[0])
+    if any(_candidate_merge_core(candidate) != first_core for candidate in candidates[1:]):
         return None, {
             "kind": "candidate",
             "key": list(_candidate_merge_key(candidates[0])),
@@ -83,7 +99,8 @@ def _merge_candidate_group(entries: list[dict[str, Any]]) -> tuple[dict[str, Any
             ],
         }
 
-    merged = dict(candidates[0])
+    preferred_entry = max(entries, key=lambda entry: _candidate_rank(entry["candidate"]))
+    merged = dict(preferred_entry["candidate"])
     evidence = []
     notes = []
     for entry in entries:
@@ -114,10 +131,14 @@ def _copy_proposal_draft_files(
     kind: str,
     proposal_dirs: list[Path],
     output_dir: Path,
-) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]]]:
+    skip_relative: set[Path] | None = None,
+    only_relative: set[Path] | None = None,
+) -> tuple[int, set[Path], list[dict[str, Any]], list[dict[str, Any]]]:
     copied = 0
+    copied_relative: set[Path] = set()
     conflicts: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
+    skip_relative = skip_relative or set()
     by_relative: dict[Path, list[dict[str, Any]]] = {}
     for proposal_dir in proposal_dirs:
         root = proposal_dir / kind
@@ -132,6 +153,10 @@ def _copy_proposal_draft_files(
             })
 
     for rel, entries in sorted(by_relative.items(), key=lambda item: str(item[0])):
+        if rel in skip_relative:
+            continue
+        if only_relative is not None and rel not in only_relative:
+            continue
         payload_keys = {_json_key(entry["payload"]) for entry in entries}
         if len(payload_keys) > 1:
             stripped_keys = {_json_key(_draft_payload_without_description(entry["payload"])) for entry in entries}
@@ -152,6 +177,7 @@ def _copy_proposal_draft_files(
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(entries[0]["path"], dst)
                 copied += 1
+                copied_relative.add(rel)
                 continue
             conflicts.append({
                 "kind": kind,
@@ -170,25 +196,115 @@ def _copy_proposal_draft_files(
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(entries[0]["path"], dst)
         copied += 1
-    return copied, conflicts, warnings
+        copied_relative.add(rel)
+    return copied, copied_relative, conflicts, warnings
 
 
-def _merge_review_markdown(report: dict[str, Any]) -> str:
-    summary = report["summary"]
+def _config_dir_for_proposal(proposal_dir: Path) -> Path:
+    return proposal_dir.parent / "config" if proposal_dir.name == "proposal" else proposal_dir / "config"
+
+
+def _merge_run_config(*, proposal_dirs: list[Path], output_dir: Path) -> tuple[bool, list[dict[str, Any]]]:
+    entries: list[dict[str, Any]] = []
+    for proposal_dir in proposal_dirs:
+        path = _config_dir_for_proposal(proposal_dir) / "run_config.json"
+        if not path.exists():
+            continue
+        entries.append({
+            "proposal": str(proposal_dir),
+            "path": path,
+            "payload": _load_json(path),
+        })
+
+    if not entries:
+        return False, [{
+            "kind": "run_config",
+            "path": "config/run_config.json",
+            "reason": "missing run_config.json in every input proposal",
+            "variants": [],
+        }]
+
+    payload_keys = {_json_key(entry["payload"]) for entry in entries}
+    if len(payload_keys) > 1:
+        return False, [{
+            "kind": "run_config",
+            "path": "config/run_config.json",
+            "reason": "conflicting run_config payloads",
+            "variants": [
+                {
+                    "proposal": entry["proposal"],
+                    "path": str(entry["path"]),
+                }
+                for entry in entries
+            ],
+        }]
+
+    dst = output_dir.parent / "config" / "run_config.json"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(dst, entries[0]["payload"])
+    return True, []
+
+
+def _merge_architecture_markdown(proposal_dirs: list[Path]) -> str:
+    entries: list[dict[str, str]] = []
+    for proposal_dir in proposal_dirs:
+        path = proposal_dir / "architecture.md"
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8").strip()
+        if not text:
+            continue
+        entries.append({
+            "proposal": str(proposal_dir),
+            "path": str(path),
+            "text": text,
+        })
+
+    if not entries:
+        return "# Merged Architecture\n\nNo source architecture.md was provided by the input proposals.\n"
+
+    base = max(entries, key=lambda entry: len(entry["text"]))
+    all_same = len({_json_key(entry["text"]) for entry in entries}) == 1
     lines = [
-        "# Merged Proposal Review",
+        "# Merged Architecture",
         "",
+        f"Base architecture: `{base['path']}`.",
+    ]
+    if not all_same:
+        lines.extend([
+            "",
+            "Other architecture sources for manual comparison:",
+            "",
+        ])
+        lines.extend(f"- `{entry['path']}`" for entry in entries if entry["path"] != base["path"])
+    lines.extend(["", "---", "", base["text"], ""])
+    return "\n".join(lines)
+
+
+def _merge_checklist_markdown(report: dict[str, Any]) -> str:
+    summary = report["summary"]
+    has_conflicts = bool(report["conflicts"])
+    lines = [
+        "# Review Checklist",
+        "",
+        "This is the merged proposal checklist. It is short by design: keep the source agent checklists in their original proposal dirs, and use this file to track what must be resolved before promotion.",
+        "",
+        "## Merge Status",
+        "",
+        f"- status: {'FIX_REQUIRED' if has_conflicts else 'READY_FOR_CHECK'}",
         f"- input proposals: {summary['proposals']}",
-        f"- input candidates: {summary['input_candidates']}",
-        f"- merged candidates: {summary['merged_candidates']}",
+        f"- merged candidates: {summary['merged_candidates']} / {summary['input_candidates']}",
         f"- conflicts: {summary['conflicts']}",
+        f"- definitions copied: {summary['definitions_copied']}",
+        f"- definition hints copied: {summary['definition_hints_copied']}",
+        f"- run_config copied: {summary['run_config_copied']}",
         "",
-        "## Inputs",
+        "## Source Checklists",
         "",
     ]
-    lines.extend(f"- {path}" for path in report["inputs"])
-    lines.extend(["", "## Conflicts", ""])
-    if not report["conflicts"]:
+    lines.extend(f"- {path}/review_checklist.md" for path in report["inputs"])
+    lines.extend(["", "## Conflicts To Resolve", ""])
+    if not has_conflicts:
         lines.append("- none")
     else:
         for item in report["conflicts"]:
@@ -202,13 +318,20 @@ def _merge_review_markdown(report: dict[str, Any]) -> str:
         for item in warnings:
             name = item.get("path") or item.get("key") or "unknown"
             lines.append(f"- {item.get('kind', 'unknown')}: {name} ({item.get('reason', 'warning')})")
-    lines.extend([
-        "",
-        "## Human Action",
-        "",
-        "Review conflicts before promoting anything into config/. This merged proposal is review-only and does not approve targets.",
-        "",
-    ])
+    lines.extend(["", "## Before Promotion", ""])
+    if has_conflicts:
+        lines.extend([
+            "- Resolve every conflict listed above.",
+            "- Re-run merge-proposals or edit the merged proposal explicitly.",
+            "- Run check-proposal after conflicts are resolved.",
+        ])
+    else:
+        lines.extend([
+            "- Run check-proposal on this merged proposal.",
+            "- Review candidate_targets.json, definitions/, and definition_hints/ before copying anything into config/.",
+            "- Promote only reviewed runtime fields; keep proposal-only notes out of config/.",
+        ])
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -229,6 +352,8 @@ def merge_proposals(*, proposal_dirs: list[Path], output_dir: Path) -> dict[str,
     output_dir.mkdir(parents=True, exist_ok=True)
     shutil.rmtree(output_dir / "definitions", ignore_errors=True)
     shutil.rmtree(output_dir / "definition_hints", ignore_errors=True)
+
+    run_config_copied, run_config_conflicts = _merge_run_config(proposal_dirs=resolved_dirs, output_dir=output_dir)
 
     groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
     input_candidates = 0
@@ -259,27 +384,30 @@ def merge_proposals(*, proposal_dirs: list[Path], output_dir: Path) -> dict[str,
             merged_candidates.append(merged)
     merged_candidates.sort(key=lambda item: str(item.get("name") or _candidate_merge_key(item)))
 
-    definitions_copied, definition_conflicts, definition_warnings = _copy_proposal_draft_files(
+    definitions_copied, copied_definition_paths, definition_conflicts, definition_warnings = _copy_proposal_draft_files(
         kind="definitions",
         proposal_dirs=resolved_dirs,
         output_dir=output_dir,
     )
-    hints_copied, hint_conflicts, hint_warnings = _copy_proposal_draft_files(
+    conflicted_definition_paths = {
+        Path(str(item["path"]))
+        for item in definition_conflicts
+        if isinstance(item.get("path"), str)
+    }
+    hints_copied, _, hint_conflicts, hint_warnings = _copy_proposal_draft_files(
         kind="definition_hints",
         proposal_dirs=resolved_dirs,
         output_dir=output_dir,
+        skip_relative=conflicted_definition_paths,
+        only_relative=copied_definition_paths,
     )
     conflicts.extend(definition_conflicts)
     conflicts.extend(hint_conflicts)
+    conflicts.extend(run_config_conflicts)
     warnings = definition_warnings + hint_warnings
 
     _write_json(output_dir / "candidate_targets.json", merged_candidates)
-    (output_dir / "architecture.md").write_text(
-        "# Merged Proposal\n\n"
-        "This proposal was generated by `flashinfer_bench.onboarding.proposal_tools merge-proposals`.\n"
-        "Use `merge_review.md` before promoting anything into config/.\n",
-        encoding="utf-8",
-    )
+    (output_dir / "architecture.md").write_text(_merge_architecture_markdown(resolved_dirs), encoding="utf-8")
     report = {
         "summary": {
             "ok": not conflicts,
@@ -288,9 +416,11 @@ def merge_proposals(*, proposal_dirs: list[Path], output_dir: Path) -> dict[str,
             "merged_candidates": len(merged_candidates),
             "candidate_conflicts": sum(1 for item in conflicts if item.get("kind") == "candidate"),
             "draft_file_conflicts": sum(1 for item in conflicts if item.get("kind") in {"definitions", "definition_hints"}),
+            "run_config_conflicts": sum(1 for item in conflicts if item.get("kind") == "run_config"),
             "conflicts": len(conflicts),
             "definitions_copied": definitions_copied,
             "definition_hints_copied": hints_copied,
+            "run_config_copied": run_config_copied,
             "warnings": len(warnings),
         },
         "inputs": [str(path) for path in resolved_dirs],
@@ -299,14 +429,5 @@ def merge_proposals(*, proposal_dirs: list[Path], output_dir: Path) -> dict[str,
         "warnings": warnings,
     }
     _write_json(output_dir / "merge_report.json", report)
-    (output_dir / "merge_review.md").write_text(_merge_review_markdown(report), encoding="utf-8")
-    (output_dir / "review_checklist.md").write_text(
-        "# Review Checklist\n\n"
-        "- Read merge_review.md.\n"
-        "- Resolve every conflict before promoting candidates into config/.\n"
-        "- Run check-proposal on the merged proposal after manual conflict resolution.\n",
-        encoding="utf-8",
-    )
+    (output_dir / "review_checklist.md").write_text(_merge_checklist_markdown(report), encoding="utf-8")
     return report
-
-

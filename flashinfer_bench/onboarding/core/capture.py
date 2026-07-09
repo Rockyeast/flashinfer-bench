@@ -433,7 +433,9 @@ class CaptureSession:
     def _make_wrapper(self, target: ProbeTarget, original: Callable[..., Any]) -> Callable[..., Any]:
         def wrapped(*args: Any, **kwargs: Any) -> Any:
             if self._target_matches_dispatch(target, args):
-                traced_definition = self._trace_definition(original, target, args, kwargs)
+                traced_definition = None
+                if not self.is_warmup:
+                    traced_definition = self._trace_definition(original, target, args, kwargs)
                 self._write_event(target, args, kwargs, traced_definition=traced_definition)
             return original(*args, **kwargs)
 
@@ -557,7 +559,9 @@ class CaptureSession:
                     continue
                 if not self._target_matches_dispatch(target, args):
                     continue
-                traced_definition = self._trace_definition(original, target, args, kwargs)
+                traced_definition = None
+                if not self.is_warmup:
+                    traced_definition = self._trace_definition(original, target, args, kwargs)
                 self._write_event(target, args, kwargs, scope, traced_definition=traced_definition)
             return original(*args, **kwargs)
 

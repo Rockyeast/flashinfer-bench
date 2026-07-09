@@ -50,7 +50,7 @@ def slug_model_name(model_name: str) -> str:
 
 
 def _default_run_prefix(model_name: str) -> Path:
-    return Path(slug_model_name(model_name)) / f"{datetime.now().strftime('%Y%m%d')}_firstpass"
+    return Path(slug_model_name(model_name)) / datetime.now().strftime("%Y%m%d")
 
 
 def _default_hf_config_path(model_name: str) -> Path:

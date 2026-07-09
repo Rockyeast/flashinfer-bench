@@ -15,6 +15,7 @@ def _check_candidate_fields(path: Path) -> dict[str, Any]:
         raise ValueError(f"candidate targets must be a list: {path}")
 
     findings: list[dict[str, str]] = []
+    seen_approved_targets: dict[tuple[Any, ...], str] = {}
     for index, item in enumerate(raw):
         if not isinstance(item, dict):
             findings.append({
@@ -120,12 +121,45 @@ def _check_candidate_fields(path: Path) -> dict[str, Any]:
                 "reason": "dispatch_value must be an integer",
             })
 
-        if status == "approved" and not isinstance(target, str):
-            findings.append({
-                "severity": "error",
-                "name": name,
-                "reason": "approved entry has no hook target",
-            })
+        if status == "approved":
+            if collect is not True:
+                findings.append({
+                    "severity": "error",
+                    "name": name,
+                    "reason": "approved target must use collect=true",
+                })
+            if not isinstance(target, str) or not target:
+                findings.append({
+                    "severity": "error",
+                    "name": name,
+                    "reason": "approved target entry must declare a non-empty hook target",
+                })
+            if not isinstance(module, str) or not module or not isinstance(attr, str) or not attr:
+                findings.append({
+                    "severity": "error",
+                    "name": name,
+                    "reason": "approved target entry must declare explicit module/attr",
+                })
+            runtime_key = (
+                target,
+                module,
+                attr,
+                backend,
+                op_type,
+                item.get("variant"),
+                item.get("probe_mode", "default"),
+                item.get("page_size"),
+                dispatch_value,
+            )
+            previous = seen_approved_targets.get(runtime_key)
+            if previous is not None:
+                findings.append({
+                    "severity": "error",
+                    "name": name,
+                    "reason": f"duplicate approved runtime target also declared by {previous}",
+                })
+            else:
+                seen_approved_targets[runtime_key] = name
         if (
             backend != "flashinfer"
             and isinstance(op_type, str)
@@ -164,6 +198,12 @@ def _check_candidate_fields(path: Path) -> dict[str, Any]:
                     "reason": "non-FlashInfer collect target should include source evidence for reviewed definition/hints",
                 })
         if backend == "flashinfer" and collect is True:
+            if status == "approved" and definition_source not in {"fitrace", "manual"}:
+                findings.append({
+                    "severity": "error",
+                    "name": name,
+                    "reason": "approved FlashInfer collect target must use definition_source=fitrace or manual",
+                })
             if not isinstance(module, str) or not module or not isinstance(attr, str) or not attr:
                 findings.append({
                     "severity": "warning",
