@@ -70,13 +70,13 @@ def test_materialize_modal_result_extracts_remote_collect_and_redacts_archives(t
             "workloads": [
                 {
                     "name": "demo",
-                    "definition_path": "/tmp/flashinfer-trace-probe/audited_definitions/gqa_paged/demo.json",
-                    "capture_paths": ["/tmp/flashinfer-trace-probe/captures/x.pt"],
+                    "definition_path": "/tmp/flashinfer-bench-onboarding-probe/audited_definitions/gqa_paged/demo.json",
+                    "capture_paths": ["/tmp/flashinfer-bench-onboarding-probe/captures/x.pt"],
                     "workload_paths": [
-                        "/tmp/flashinfer-trace-probe/collect/workloads/gqa_paged/demo.jsonl"
+                        "/tmp/flashinfer-bench-onboarding-probe/collect/workloads/gqa_paged/demo.jsonl"
                     ],
                     "blob_paths": [
-                        "/tmp/flashinfer-trace-probe/collect/blob/workloads/gqa_paged/demo/x.safetensors"
+                        "/tmp/flashinfer-bench-onboarding-probe/collect/blob/workloads/gqa_paged/demo/x.safetensors"
                     ],
                 }
             ],
@@ -87,9 +87,9 @@ def test_materialize_modal_result_extracts_remote_collect_and_redacts_archives(t
         json.dumps({
             "targets": [
                 {
-                    "name": "demo",
-                    "definition_name": "demo",
-                    "definition_path": "/tmp/flashinfer-trace-probe/audited_definitions/gqa_paged/demo.json",
+                        "name": "demo",
+                        "definition_name": "demo",
+                        "definition_path": "/tmp/flashinfer-bench-onboarding-probe/audited_definitions/gqa_paged/demo.json",
                 }
             ]
         }),
@@ -123,7 +123,7 @@ def test_materialize_modal_result_extracts_remote_collect_and_redacts_archives(t
     local_manifest = result["workload_manifest"]
     workload = local_manifest["workloads"][0]
     assert workload["definition_path"] == str(tmp_path / "run" / "output" / "definitions" / "gqa_paged" / "demo.json")
-    assert workload["capture_paths"] == ["/tmp/flashinfer-trace-probe/captures/x.pt"]
+    assert workload["capture_paths"] == ["/tmp/flashinfer-bench-onboarding-probe/captures/x.pt"]
     assert workload["workload_paths"] == [
         str(tmp_path / "run" / "output" / "workloads" / "gqa_paged" / "demo.jsonl")
     ]

@@ -22,7 +22,7 @@ def _candidate_merge_key(item: dict[str, Any]) -> tuple[Any, ...]:
     target = item.get("target")
     hook_key = ("module_attr", module, attr) if module and attr else ("target", target)
     definition_source = item.get("definition_source")
-    if item.get("backend") == "flashinfer" or item.get("collect") is False:
+    if item.get("backend") == "flashinfer":
         definition_source = None
     return (
         "target",
@@ -47,7 +47,7 @@ def _candidate_core(item: dict[str, Any]) -> dict[str, Any]:
 
 def _candidate_merge_core(item: dict[str, Any]) -> dict[str, Any]:
     core = _candidate_core(item)
-    if item.get("backend") == "flashinfer" or item.get("collect") is False:
+    if item.get("backend") == "flashinfer":
         core.pop("definition_source", None)
     return core
 
@@ -217,12 +217,7 @@ def _merge_run_config(*, proposal_dirs: list[Path], output_dir: Path) -> tuple[b
         })
 
     if not entries:
-        return False, [{
-            "kind": "run_config",
-            "path": "config/run_config.json",
-            "reason": "missing run_config.json in every input proposal",
-            "variants": [],
-        }]
+        return False, []
 
     payload_keys = {_json_key(entry["payload"]) for entry in entries}
     if len(payload_keys) > 1:

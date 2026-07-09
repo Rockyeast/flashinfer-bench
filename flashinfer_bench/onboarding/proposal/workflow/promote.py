@@ -148,6 +148,8 @@ def promoted_config_sync_errors(
         proposal_dir = _resolve_proposal_dir(run_dir)
         resolved_config_dir = config_dir or (run_dir / "config")
     else:
+        if not proposal_dir.exists():
+            return []
         proposal_dir = _resolve_proposal_dir(proposal_dir)
         resolved_config_dir = config_dir or _resolve_config_dir_from_proposal(proposal_dir)
 

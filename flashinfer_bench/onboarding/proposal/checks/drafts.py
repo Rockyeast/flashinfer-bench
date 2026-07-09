@@ -178,12 +178,6 @@ def _check_definition_name_style(*, name: str, op_type: str, model_slug: str | N
                 "name": name,
                 "reason": "silu_and_mul definition_name must be silu_and_mul_i<N>",
             })
-    elif not (name == op_type or name.startswith(f"{op_type}_")):
-        findings.append({
-            "severity": "warning",
-            "name": name,
-            "reason": f"definition_name should normally start with op_type {op_type!r}",
-        })
     return findings
 
 
