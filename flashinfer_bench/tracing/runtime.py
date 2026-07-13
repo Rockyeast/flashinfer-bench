@@ -211,7 +211,7 @@ class TracingRuntime:
         - Tensor validation fails (wrong shape, dtype, etc.)
         - Axis inference fails
         """
-        logger.info(f"Tracing '{def_name}'")
+        logger.debug(f"Tracing '{def_name}'")
 
         tracing_config = self._config_registry.get(def_name)
         if tracing_config is None:
@@ -413,7 +413,7 @@ class TracingRuntime:
             num_selected_entries += len(selected_entries)
 
         # Log stats
-        logger.info(
+        logger.debug(
             f"Flush done. {num_selected_entries} entries selected, {num_dump_errors} dump errors"
         )
 
