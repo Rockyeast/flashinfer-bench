@@ -29,22 +29,23 @@ Do not use the legacy `review-onboarding-proposal`, `collect-workloads`, or
 ## Stage 1: Dump Definitions
 
 ```bash
-python3 -B -m flashinfer_bench.onboarding.cli dump-definition \
+flashinfer-bench onboarding dump-definition \
   --run {run_name} \
   --model-name {hf_model_id} \
   --gpu {modal_gpu}
 ```
 
-This performs one short SGLang pass with FlashInfer definition tracing and executed-module
-inventory. Pass `--compare-sglang-logger` only when an optional output-logger comparison is
-needed and the model is compatible with SGLang's debug logger. It writes:
+This performs one short SGLang pass with FlashInfer definition tracing, executed-module
+inventory, and SGLang output-logger comparison. The logger is enabled by default in the
+same pass; use `--no-compare-sglang-logger` only when its overhead must be disabled. It
+writes:
 
 ```text
 runs/{run_name}/definitions/
 runs/{run_name}/reports/definition_report.json
 runs/{run_name}/reports/definition_review.md
-runs/{run_name}/reports/sglang_modules.json
-runs/{run_name}/reports/sglang_logger_report.json
+runs/{run_name}/reports/evidence/sglang_execution_inventory.json
+runs/{run_name}/reports/evidence/sglang_logger.json
 ```
 
 Stop for human review. Inspect source evidence and edit `definitions/` in place. Do not
@@ -58,14 +59,14 @@ use exactly one source-backed capture tag:
 Input names default to runtime argument names. Use
 `sglang_input:<definition_input>=arg:<runtime_argument>` or
 `sglang_input:<definition_input>=attr:<module_attribute>` only when an explicit mapping is
-needed. SGLang's built-in tensor logger is output-only comparison evidence and must not be
-treated as complete workload input capture.
+needed. SGLang's built-in tensor logger is output-signature coverage evidence, not exact
+module identity or complete workload input capture.
 
 Use the same command with `--agent codex` when Agent source analysis should write FI and
 non-FI definitions directly:
 
 ```bash
-python3 -B -m flashinfer_bench.onboarding.cli dump-definition \
+flashinfer-bench onboarding dump-definition \
   --run {run_name} \
   --model-name {hf_model_id} \
   --gpu {modal_gpu} \
@@ -80,7 +81,7 @@ not create a separate proposal or patch artifact.
 After the human accepts the current definition snapshot:
 
 ```bash
-python3 -B -m flashinfer_bench.onboarding.cli dump-workload \
+flashinfer-bench onboarding dump-workload \
   --run {run_name}
 ```
 
@@ -112,6 +113,23 @@ run snapshot. Do not hide a failed workload behind a warning.
 - A missing FI kernel may use an observed `sglang_module:`/`sglang_callable:` capture point;
   otherwise it remains non-collectable.
 - Use `--resume-call-id` after a local disconnect; do not start a duplicate remote call.
+
+## Submission Gate
+
+Workload validation and publication validation are separate. After adding one reference
+test per new definition under `output/tests/references/`, run:
+
+```bash
+flashinfer-bench onboarding check-submission \
+  --run {run_name} \
+  --upstream-dataset tmp/flashinfer-trace
+```
+
+The gate requires complete descriptions, allowed publication tags/status, no conflicting
+upstream definition, and a reference test for every new definition. Follow the compatible
+ground-truth hierarchy from `add-reference-tests`: FlashInfer first, exact SGLang source
+only when FlashInfer has no equivalent kernel. Do not follow that legacy skill's old
+`tmp/` staging or phase/manifest workflow.
 
 See `flashinfer_bench/onboarding/README.md` and `user_guide.md` for the file and failure
 contracts.

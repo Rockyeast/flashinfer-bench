@@ -141,7 +141,7 @@ def _run_sglang_pass(plan: dict[str, Any], *, paged: bool, page_size: int | None
 
 
 def _run_generation_requests(engine: Any, plan: dict[str, Any]) -> None:
-    scenarios = _prompt_scenarios(plan)
+    scenarios = _request_scenarios(plan)
     base = plan.get("sampling")
     if not isinstance(base, dict) or type(base.get("max_new_tokens")) is not int:
         raise ValueError("stage plan missing sampling.max_new_tokens")
@@ -152,90 +152,79 @@ def _run_generation_requests(engine: Any, plan: dict[str, Any]) -> None:
     )
     for name, parameters, use_scenario_tokens in runs:
         for scenario in scenarios:
-            run_parameters = dict(parameters)
-            if scenario["source"] == "inferencex":
-                input_ids, sampling_params = _inferencex_batch(
-                    engine, scenario, run_parameters, use_scenario_tokens=use_scenario_tokens
-                )
-                print(
-                    f"[flashinfer_bench.onboarding] request: {name}/{scenario['name']}", flush=True
-                )
-                engine.generate(input_ids=input_ids, sampling_params=sampling_params)
-                continue
-            if use_scenario_tokens:
-                run_parameters["max_new_tokens"] = int(scenario["max_new_tokens"])
-            else:
-                run_parameters.setdefault("max_new_tokens", int(scenario["max_new_tokens"]))
-            prompts = scenario["prompts"]
-            prompt_input: str | list[str] = prompts[0] if len(prompts) == 1 else prompts
+            input_ids, sampling_params = _synthetic_token_batch(
+                engine,
+                scenario,
+                dict(parameters),
+                use_scenario_tokens=use_scenario_tokens,
+            )
             print(f"[flashinfer_bench.onboarding] request: {name}/{scenario['name']}", flush=True)
-            try:
-                engine.generate(prompt_input, sampling_params=run_parameters)
-            except TypeError:
-                engine.generate(prompt_input, max_new_tokens=int(run_parameters["max_new_tokens"]))
+            engine.generate(input_ids=input_ids, sampling_params=sampling_params)
 
 
-def _prompt_scenarios(plan: dict[str, Any]) -> list[dict[str, Any]]:
-    value = plan.get("prompt_scenarios")
+def _request_scenarios(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    value = plan.get("request_scenarios")
     if not isinstance(value, list) or not value:
-        raise ValueError("stage plan missing prompt_scenarios")
+        raise ValueError("stage plan missing request_scenarios")
     scenarios = []
     for index, item in enumerate(value):
         if not isinstance(item, dict):
-            raise ValueError(f"prompt_scenarios[{index}] must be an object")
-        source = str(item.get("source") or "sharegpt")
-        if source == "inferencex":
-            scenarios.append(
-                {
-                    "name": str(item.get("name") or f"scenario_{index + 1}"),
-                    "source": source,
-                    "profile": str(item.get("profile") or "custom"),
-                    "input_len": _positive_int(
-                        item.get("input_len"), f"prompt_scenarios[{index}].input_len"
-                    ),
-                    "output_len": _positive_int(
-                        item.get("output_len"), f"prompt_scenarios[{index}].output_len"
-                    ),
-                    "batch_size": _positive_int(
-                        item.get("batch_size"), f"prompt_scenarios[{index}].batch_size"
-                    ),
-                    "range_ratio": _range_ratio(
-                        item.get("range_ratio"), f"prompt_scenarios[{index}].range_ratio"
-                    ),
-                    "seed": _integer(item.get("seed"), f"prompt_scenarios[{index}].seed"),
-                }
+            raise ValueError(f"request_scenarios[{index}] must be an object")
+        source = str(item.get("source") or "synthetic")
+        if source != "synthetic":
+            raise ValueError(f"request_scenarios[{index}].source is unsupported: {source}")
+        scenario = {
+            "name": str(item.get("name") or f"scenario_{index + 1}"),
+            "source": source,
+            "input_len": _positive_int(
+                item.get("input_len"), f"request_scenarios[{index}].input_len"
+            ),
+            "output_len": _positive_int(
+                item.get("output_len"), f"request_scenarios[{index}].output_len"
+            ),
+            "batch_size": _positive_int(
+                item.get("batch_size"), f"request_scenarios[{index}].batch_size"
+            ),
+            "range_ratio": _range_ratio(
+                item.get("range_ratio"), f"request_scenarios[{index}].range_ratio"
+            ),
+            "seed": _integer(item.get("seed"), f"request_scenarios[{index}].seed"),
+        }
+        context_fraction = item.get("context_fraction")
+        if context_fraction is not None:
+            scenario["context_fraction"] = _range_ratio(
+                context_fraction, f"request_scenarios[{index}].context_fraction"
             )
-            continue
-        if source != "sharegpt":
-            raise ValueError(f"prompt_scenarios[{index}].source is unsupported: {source}")
-        prompts = item.get("prompts")
-        if not isinstance(prompts, list) or not prompts:
-            raise ValueError(f"prompt_scenarios[{index}].prompts must be a non-empty list")
-        scenarios.append(
-            {
-                "name": str(item.get("name") or f"scenario_{index + 1}"),
-                "source": source,
-                "prompts": [str(prompt) for prompt in prompts],
-                "max_new_tokens": int(item.get("max_new_tokens") or 1),
-            }
-        )
+        shared_prefix_len = item.get("shared_prefix_len")
+        if shared_prefix_len is not None:
+            shared_prefix_len = _positive_int(
+                shared_prefix_len, f"request_scenarios[{index}].shared_prefix_len"
+            )
+            if shared_prefix_len >= scenario["input_len"]:
+                raise ValueError(
+                    f"request_scenarios[{index}].shared_prefix_len must be smaller than input_len"
+                )
+            scenario["shared_prefix_len"] = shared_prefix_len
+        scenarios.append(scenario)
     return scenarios
 
 
-def _inferencex_batch(
+def _synthetic_token_batch(
     engine: Any, scenario: dict[str, Any], parameters: dict[str, Any], *, use_scenario_tokens: bool
 ) -> tuple[list[list[int]], list[dict[str, Any]]]:
     rng = random.Random(int(scenario["seed"]))
     batch_size = int(scenario["batch_size"])
     ratio = float(scenario["range_ratio"])
-    input_lens = _sample_lengths(rng, int(scenario["input_len"]), ratio, batch_size)
+    input_len = _effective_input_len(engine, scenario)
+    input_lens = _sample_lengths(rng, input_len, ratio, batch_size)
     output_lens = _sample_lengths(rng, int(scenario["output_len"]), ratio, batch_size)
     vocab_size = _engine_vocab_size(engine)
-    offsets = [rng.randrange(vocab_size) for _ in range(batch_size)]
-    input_ids = [
-        [(offsets[index] + index + position) % vocab_size for position in range(length)]
-        for index, length in enumerate(input_lens)
-    ]
+    shared_prefix_len = min(int(scenario.get("shared_prefix_len") or 0), min(input_lens))
+    shared_prefix = [rng.randrange(vocab_size) for _ in range(shared_prefix_len)]
+    input_ids = []
+    for length in input_lens:
+        suffix = [rng.randrange(vocab_size) for _ in range(length - shared_prefix_len)]
+        input_ids.append([*shared_prefix, *suffix])
     sampling_params = []
     for output_len in output_lens:
         item = dict(parameters)
@@ -246,6 +235,31 @@ def _inferencex_batch(
         item["ignore_eos"] = True
         sampling_params.append(item)
     return input_ids, sampling_params
+
+
+def _effective_input_len(engine: Any, scenario: dict[str, Any]) -> int:
+    target = int(scenario["input_len"])
+    context_len = _engine_context_length(engine)
+    if context_len is not None:
+        target = min(target, max(context_len - int(scenario["output_len"]) - 1, 1))
+    fraction = scenario.get("context_fraction")
+    if fraction is None:
+        return target
+    if context_len is None:
+        return target
+    return max(min(target, int(context_len * float(fraction))), 1)
+
+
+def _engine_context_length(engine: Any) -> int | None:
+    tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+    model_config = getattr(tokenizer_manager, "model_config", None)
+    candidates = [model_config, getattr(model_config, "hf_config", None)]
+    for candidate in candidates:
+        for name in ("context_len", "context_length", "max_position_embeddings"):
+            value = getattr(candidate, name, None)
+            if type(value) is int and value > 0:
+                return value
+    return None
 
 
 def _sample_lengths(rng: random.Random, target: int, ratio: float, count: int) -> list[int]:

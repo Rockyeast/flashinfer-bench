@@ -5,7 +5,8 @@ already have an equivalent native FlashInfer definition.
 
 ## Evidence
 
-Use the supplied `reports/sglang_modules.json` as execution and source evidence. SGLang's
+Use the supplied `reports/evidence/sglang_execution_inventory.json` as execution and
+source evidence. SGLang's
 tensor logger report is output-only comparison evidence; it does not prove complete input
 capture and must not be used as the workload input source.
 

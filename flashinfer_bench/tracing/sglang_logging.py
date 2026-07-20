@@ -8,6 +8,7 @@ import importlib
 import inspect
 import json
 import os
+import re
 import shutil
 import threading
 from contextlib import contextmanager
@@ -47,7 +48,10 @@ class _ProcessState:
     specs_by_module: dict[str, list[SGLangCaptureSpec]] = field(default_factory=dict)
     specs_by_callable: dict[str, list[SGLangCaptureSpec]] = field(default_factory=dict)
     runtime: TracingRuntime | None = None
-    inventory_seen: set[str] = field(default_factory=set)
+    inventory_seen: set[tuple[str, str]] = field(default_factory=set)
+    module_parents: dict[int, list[tuple[torch.nn.Module, str]]] = field(
+        default_factory=dict
+    )
     captures: dict[str, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     callable_patches: list[tuple[Any, str, Any]] = field(default_factory=list)
@@ -58,6 +62,8 @@ class _ProcessState:
 _STATES: dict[int, _ProcessState] = {}
 _HOOK_HANDLE: Any = None
 _HOOK_PID: int | None = None
+_REGISTRATION_HOOK_HANDLE: Any = None
+_REGISTRATION_HOOK_PID: int | None = None
 _ATEXIT_REGISTERED = False
 _IN_HOOK = threading.local()
 
@@ -127,6 +133,7 @@ def install_from_env() -> None:
     if mode not in {"inventory", "workloads"} or not root:
         return
     state = _state_for_current_process()
+    _install_module_registration_hook()
     _install_global_module_hook()
     if state.mode == "workloads" and not state.callable_patches:
         _install_callable_wrappers(state)
@@ -135,7 +142,7 @@ def install_from_env() -> None:
 
 def uninstall_current_process() -> None:
     """Flush and remove hooks installed in the current process."""
-    global _HOOK_HANDLE, _HOOK_PID
+    global _HOOK_HANDLE, _HOOK_PID, _REGISTRATION_HOOK_HANDLE, _REGISTRATION_HOOK_PID
     state = _STATES.pop(os.getpid(), None)
     if state is not None:
         _flush_state(state)
@@ -145,6 +152,10 @@ def uninstall_current_process() -> None:
         _HOOK_HANDLE.remove()
         _HOOK_HANDLE = None
         _HOOK_PID = None
+    if _REGISTRATION_HOOK_HANDLE is not None and _REGISTRATION_HOOK_PID == os.getpid():
+        _REGISTRATION_HOOK_HANDLE.remove()
+        _REGISTRATION_HOOK_HANDLE = None
+        _REGISTRATION_HOOK_PID = None
 
 
 def summarize_module_inventory(capture_root: Path) -> dict[str, Any]:
@@ -163,6 +174,64 @@ def summarize_module_inventory(capture_root: Path) -> dict[str, Any]:
             processes = set(existing.pop("observed_processes", []))
             processes.add(int(item.get("pid") or 0))
             existing["observed_processes"] = sorted(process for process in processes if process)
+            module_paths = set(existing.pop("module_paths", []))
+            raw_paths = item.get("module_paths")
+            if isinstance(raw_paths, list):
+                module_paths.update(path for path in raw_paths if isinstance(path, str) and path)
+            existing["module_paths"] = sorted(module_paths)
+            layer_indices = set(existing.pop("layer_indices", []))
+            raw_indices = item.get("layer_indices")
+            if isinstance(raw_indices, list):
+                layer_indices.update(index for index in raw_indices if type(index) is int)
+            existing["layer_indices"] = sorted(layer_indices)
+            observations: set[tuple[int, str, int | None]] = set()
+            for observation in existing.pop("module_observations", []):
+                if not isinstance(observation, dict):
+                    continue
+                pid = observation.get("pid")
+                module_path = observation.get("module_path")
+                layer_index = observation.get("layer_index")
+                if type(pid) is int and isinstance(module_path, str):
+                    observations.add(
+                        (pid, module_path, layer_index if type(layer_index) is int else None)
+                    )
+            raw_observations = item.get("module_observations")
+            if isinstance(raw_observations, list):
+                for observation in raw_observations:
+                    if not isinstance(observation, dict):
+                        continue
+                    pid = observation.get("pid")
+                    module_path = observation.get("module_path")
+                    layer_index = observation.get("layer_index")
+                    if type(pid) is int and isinstance(module_path, str):
+                        observations.add(
+                            (
+                                pid,
+                                module_path,
+                                layer_index if type(layer_index) is int else None,
+                            )
+                        )
+            elif type(item.get("pid")) is int:
+                for module_path in raw_paths if isinstance(raw_paths, list) else []:
+                    if isinstance(module_path, str) and module_path:
+                        observations.add(
+                            (
+                                item["pid"],
+                                module_path,
+                                _layer_index_from_path(module_path),
+                            )
+                        )
+            existing["module_observations"] = [
+                {
+                    "pid": pid,
+                    "module_path": module_path,
+                    "layer_index": layer_index,
+                }
+                for pid, module_path, layer_index in sorted(
+                    observations,
+                    key=lambda observation: (observation[0], observation[1]),
+                )
+            ]
     return {
         "summary": {"modules": len(modules), "worker_files": len(files)},
         "modules": [modules[name] for name in sorted(modules)],
@@ -181,9 +250,28 @@ def summarize_sglang_tensor_logger(dump_root: Path) -> dict[str, Any]:
             values = torch.load(path, map_location="cpu", weights_only=True)
         if not isinstance(values, dict):
             continue
+        process = _logger_process_metadata(path)
         for name, value in values.items():
-            if isinstance(name, str) and name not in operators:
-                operators[name] = _describe_value(value)
+            if not isinstance(name, str):
+                continue
+            operator = operators.setdefault(
+                name,
+                {
+                    "module_path": name,
+                    "layer_index": _layer_index_from_path(name),
+                    **_describe_value(value),
+                    "observed_processes": [],
+                    "observed_ranks": [],
+                },
+            )
+            if process["pid"] is not None:
+                operator["observed_processes"] = sorted(
+                    {*operator["observed_processes"], process["pid"]}
+                )
+            if process["rank"] is not None:
+                operator["observed_ranks"] = sorted(
+                    {*operator["observed_ranks"], process["rank"]}
+                )
     return {
         "summary": {
             "files": len(files),
@@ -195,6 +283,124 @@ def summarize_sglang_tensor_logger(dump_root: Path) -> dict[str, Any]:
         "note": (
             "SGLang's logger records module outputs. It is comparison evidence only; "
             "definition-driven input capture uses the shared TracingRuntime."
+        ),
+    }
+
+
+def compare_sglang_logger_inventory(
+    logger_report: dict[str, Any], module_inventory: dict[str, Any]
+) -> dict[str, Any]:
+    """Compare logger outputs with tracing inventory by identity, then signature."""
+    logger_operators = logger_report.get("operators")
+    inventory_modules = module_inventory.get("modules")
+    if not isinstance(logger_operators, list):
+        logger_operators = []
+    if not isinstance(inventory_modules, list):
+        inventory_modules = []
+
+    modules_by_identity: dict[tuple[int, str], set[str]] = {}
+    modules_by_path: dict[str, set[str]] = {}
+    modules_by_signature: dict[str, set[str]] = {}
+    inventory_names: set[str] = set()
+    for module in inventory_modules:
+        if not isinstance(module, dict):
+            continue
+        class_path = module.get("class_path")
+        sample_output = module.get("sample_output")
+        if not isinstance(class_path, str) or not isinstance(sample_output, dict):
+            continue
+        inventory_names.add(class_path)
+        signature = _output_signature(sample_output)
+        modules_by_signature.setdefault(signature, set()).add(class_path)
+        module_paths = module.get("module_paths")
+        if not isinstance(module_paths, list):
+            module_paths = []
+        for module_path in module_paths:
+            if not isinstance(module_path, str) or not module_path:
+                continue
+            modules_by_path.setdefault(module_path, set()).add(class_path)
+        observations = module.get("module_observations")
+        if not isinstance(observations, list):
+            observations = []
+        for observation in observations:
+            if not isinstance(observation, dict):
+                continue
+            pid = observation.get("pid")
+            module_path = observation.get("module_path")
+            if type(pid) is int and pid > 0 and isinstance(module_path, str):
+                modules_by_identity.setdefault((pid, module_path), set()).add(class_path)
+
+    matches: list[dict[str, Any]] = []
+    logger_only: list[str] = []
+    matched_inventory: set[str] = set()
+    ambiguous = 0
+    exact_matches = 0
+    path_matches = 0
+    signature_fallback_matches = 0
+    for operator in logger_operators:
+        if not isinstance(operator, dict) or not isinstance(operator.get("name"), str):
+            continue
+        name = str(operator["name"])
+        processes = operator.get("observed_processes")
+        if not isinstance(processes, list):
+            processes = []
+        identity_candidates: set[str] = set()
+        for pid in processes:
+            if type(pid) is int:
+                identity_candidates.update(modules_by_identity.get((pid, name), set()))
+        if identity_candidates:
+            candidates = sorted(identity_candidates)
+            match_kind = "process_and_module_path"
+            exact_matches += 1
+        elif name in modules_by_path:
+            candidates = sorted(modules_by_path[name])
+            match_kind = "module_path"
+            path_matches += 1
+        else:
+            candidates = sorted(
+                modules_by_signature.get(_output_signature(operator), set())
+            )
+            match_kind = "output_signature"
+            if candidates:
+                signature_fallback_matches += 1
+        if not candidates:
+            logger_only.append(name)
+            continue
+        matched_inventory.update(candidates)
+        is_ambiguous = len(candidates) > 1
+        ambiguous += int(is_ambiguous)
+        matches.append(
+            {
+                "logger_operator": name,
+                "layer_index": operator.get("layer_index"),
+                "candidate_tracing_modules": candidates,
+                "match_kind": match_kind,
+                "ambiguous": is_ambiguous,
+            }
+        )
+
+    tracing_only = sorted(inventory_names - matched_inventory)
+    return {
+        "basis": "process_and_module_path_then_output_type_shape_dtype",
+        "summary": {
+            "logger_operators": len(logger_operators),
+            "tracing_modules_with_outputs": len(inventory_names),
+            "matched_logger_operators": len(matches),
+            "exact_identity_matched_logger_operators": exact_matches,
+            "path_matched_logger_operators": path_matches,
+            "signature_fallback_matched_logger_operators": signature_fallback_matches,
+            "logger_only_operators": len(logger_only),
+            "tracing_only_modules": len(tracing_only),
+            "ambiguous_logger_operators": ambiguous,
+        },
+        "matches": matches,
+        "logger_only": logger_only,
+        "tracing_only": tracing_only,
+        "note": (
+            "Exact matches share a process id and complete module instance path. "
+            "Path-only matches share the module path across different observed processes. "
+            "Output-signature fallback matches are coverage evidence only, not module "
+            "identity proof."
         ),
     }
 
@@ -455,20 +661,41 @@ def _install_global_module_hook() -> None:
     _HOOK_PID = os.getpid()
 
 
-def _module_forward_hook(
-    module: torch.nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any], _output: Any
+def _install_module_registration_hook() -> None:
+    global _REGISTRATION_HOOK_HANDLE, _REGISTRATION_HOOK_PID
+    if _REGISTRATION_HOOK_HANDLE is not None:
+        _REGISTRATION_HOOK_PID = os.getpid()
+        return
+    register = torch.nn.modules.module.register_module_module_registration_hook
+    _REGISTRATION_HOOK_HANDLE = register(_module_registration_hook)
+    _REGISTRATION_HOOK_PID = os.getpid()
+
+
+def _module_registration_hook(
+    parent: torch.nn.Module, name: str, child: torch.nn.Module | None
 ) -> None:
-    _handle_module_call(module, args, kwargs)
+    if child is None:
+        return
+    state = _state_for_current_process()
+    parents = state.module_parents.setdefault(id(child), [])
+    if not any(existing is parent and existing_name == name for existing, existing_name in parents):
+        parents.append((parent, name))
+
+
+def _module_forward_hook(
+    module: torch.nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any], output: Any
+) -> None:
+    _handle_module_call(module, args, kwargs, output)
 
 
 def _module_forward_hook_without_kwargs(
-    module: torch.nn.Module, args: tuple[Any, ...], _output: Any
+    module: torch.nn.Module, args: tuple[Any, ...], output: Any
 ) -> None:
-    _handle_module_call(module, args, {})
+    _handle_module_call(module, args, {}, output)
 
 
 def _handle_module_call(
-    module: torch.nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]
+    module: torch.nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any], output: Any
 ) -> None:
     if getattr(_IN_HOOK, "active", False):
         return
@@ -477,7 +704,7 @@ def _handle_module_call(
         state = _state_for_current_process()
         class_path = f"{type(module).__module__}.{type(module).__qualname__}"
         if state.mode == "inventory":
-            _record_inventory(state, module, class_path, args, kwargs)
+            _record_inventory(state, module, class_path, args, kwargs, output)
             return
         specs = state.specs_by_module.get(class_path, [])
         for spec in specs:
@@ -557,10 +784,15 @@ def _record_inventory(
     class_path: str,
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
+    output: Any,
 ) -> None:
-    if class_path in state.inventory_seen or not class_path.startswith(_INVENTORY_PREFIXES):
+    if not class_path.startswith(_INVENTORY_PREFIXES):
         return
-    state.inventory_seen.add(class_path)
+    module_paths = _module_instance_paths(state, module)
+    identities = {(class_path, path) for path in module_paths} or {(class_path, "")}
+    if identities <= state.inventory_seen:
+        return
+    state.inventory_seen.update(identities)
     forward = module.forward
     try:
         signature = inspect.signature(forward)
@@ -589,8 +821,25 @@ def _record_inventory(
         source_file = ""
     item = {
         "class_path": class_path,
+        "module_paths": module_paths,
+        "module_observations": [
+            {
+                "pid": state.pid,
+                "module_path": path,
+                "layer_index": _layer_index_from_path(path),
+            }
+            for path in module_paths
+        ],
+        "layer_indices": sorted(
+            {
+                layer_index
+                for path in module_paths
+                if (layer_index := _layer_index_from_path(path)) is not None
+            }
+        ),
         "forward_signature": str(signature),
         "sample_inputs": inputs,
+        "sample_output": _describe_value(output),
         "source_file": source_file,
         "source": source,
         "pid": state.pid,
@@ -599,6 +848,37 @@ def _record_inventory(
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
+def _module_instance_paths(state: _ProcessState, module: torch.nn.Module) -> list[str]:
+    """Recover paths relative to the root model from module registration events."""
+
+    def visit(current: torch.nn.Module, seen: set[int]) -> list[str]:
+        current_id = id(current)
+        if current_id in seen:
+            return []
+        parents = state.module_parents.get(current_id, [])
+        if not parents:
+            return [""]
+        paths: list[str] = []
+        for parent, child_name in parents:
+            for parent_path in visit(parent, {*seen, current_id}):
+                paths.append(".".join(part for part in (parent_path, child_name) if part))
+        return paths
+
+    return sorted(set(path for path in visit(module, set()) if path))
+
+
+def _layer_index_from_path(path: str) -> int | None:
+    match = re.search(r"(?:^|\.)layers\.(\d+)(?:\.|$)", path)
+    return int(match.group(1)) if match else None
+
+
+def _logger_process_metadata(path: Path) -> dict[str, int | None]:
+    match = re.search(r"Rank(?P<rank>\d+)_pid(?P<pid>\d+)", str(path.parent))
+    if match is None:
+        return {"rank": None, "pid": None}
+    return {"rank": int(match.group("rank")), "pid": int(match.group("pid"))}
 
 
 def _describe_value(value: Any) -> dict[str, Any]:
@@ -615,6 +895,23 @@ def _describe_value(value: Any) -> dict[str, Any]:
             "items": {str(key): _describe_value(item) for key, item in list(value.items())[:8]},
         }
     return {"type": type(value).__name__, "value": repr(value)[:200]}
+
+
+def _output_signature(description: dict[str, Any]) -> str:
+    """Return a stable output type/shape/dtype signature."""
+
+    def normalize(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                str(key): normalize(item)
+                for key, item in sorted(value.items())
+                if key not in {"name", "value"}
+            }
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        return value
+
+    return json.dumps(normalize(description), sort_keys=True, separators=(",", ":"))
 
 
 def _resolve_attribute(path: str) -> tuple[Any, str, Any]:

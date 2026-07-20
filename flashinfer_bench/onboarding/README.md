@@ -1,18 +1,21 @@
 # Model Onboarding
 
-Model onboarding has two public stages and two human review points:
+Model onboarding has two capture stages, two human review points, and one independent
+submission gate:
 
 ```text
 dump-definition -> review/edit definitions -> dump-workload -> review dataset
+                                                       -> check-submission
 ```
 
-`definitions/` is the single reviewed source. There is no proposal/config copy and no
-separate definition transformation layer.
+`definitions/` is the single reviewed source. There is no proposal/config copy. Workload
+export only removes capture-specific metadata from the publication copy under
+`output/definitions/`; it does not create another reviewed definition source.
 
 ## 1. Dump and Analyze Definitions
 
 ```bash
-python3 -B -m flashinfer_bench.onboarding.cli dump-definition \
+flashinfer-bench onboarding dump-definition \
   --run qwen3/20260711 \
   --model-name Qwen/Qwen3-1.7B \
   --gpu L40S \
@@ -28,8 +31,9 @@ runs/qwen3/20260711/
 └── reports/
     ├── definition_report.json
     ├── definition_review.md
-    ├── sglang_modules.json
-    └── sglang_logger_report.json
+    └── evidence/
+        ├── sglang_execution_inventory.json
+        └── sglang_logger.json
 ```
 
 Three evidence sources are combined:
@@ -37,9 +41,11 @@ Three evidence sources are combined:
 - FlashInfer native definition tracing writes `fi_api:` definitions.
 - A worker bootstrap records the exact SGLang module classes, forward signatures, sample
   input shapes, and bounded source snippets that actually executed.
-- With `--compare-sglang-logger`, SGLang's built-in tensor logger records first-layer
-  outputs as optional comparison evidence. It
-  does not create workloads because it does not preserve complete operator inputs.
+- SGLang's built-in tensor logger is enabled by default. In the same short model pass it
+  records first-layer outputs, which are compared with tracing inventory by output
+  type/shape/dtype. This is coverage evidence, not exact module identity. It does not
+  create workloads because it does not preserve complete operator inputs. Pass
+  `--no-compare-sglang-logger` to disable it.
 
 With `--agent codex`, the agent reads this evidence and writes Definition JSON directly.
 It may preserve native FI definitions or add non-FI definitions; it does not create a
@@ -70,7 +76,7 @@ explicit.
 ## 2. Dump Workloads
 
 ```bash
-python3 -B -m flashinfer_bench.onboarding.cli dump-workload \
+flashinfer-bench onboarding dump-workload \
   --run qwen3/20260711
 ```
 
@@ -92,8 +98,10 @@ runs/qwen3/20260711/
 ├── output/
 │   ├── definitions/
 │   ├── workloads/
-│   └── blob/
+│   ├── blob/
+│   └── tests/references/        # added before submission for new definitions
 └── reports/
+    ├── evidence/capture_metadata.json
     ├── run_report.json
     └── review.md
 ```
@@ -102,6 +110,45 @@ The command fails when a collectable definition produces no workload or when the
 dataset validator fails. With `--agent codex`, the failure report is another source for
 definition analysis. If the agent changes `definitions/`, the old output is stale; review
 the new snapshot and rerun `dump-workload`.
+
+`definitions/` keeps capture-only `sglang_*` metadata needed by the workload stage.
+Published copies under `output/definitions/` exclude that metadata; the removed fields are
+recorded in `reports/evidence/capture_metadata.json` instead.
+
+## 3. Review Reference Tests
+
+After successful workload validation, `dump-workload` automatically generates deterministic
+tests for supported FlashInfer APIs. When `dump-workload` is run with `--agent codex`, it also
+asks Agent to write source-backed non-FI tests. The pipeline then stops for human review.
+
+The standalone command is retained for rerunning this step or selecting a custom tests directory:
+
+```bash
+flashinfer-bench onboarding prepare-reference-tests \
+  --run qwen3/20260711 \
+  --agent codex
+```
+
+Generated tests are written to `output/tests/references/`. FI tests compare the Definition's
+PyTorch `reference.run()` with the exact `fi_api:` implementation. Non-FI tests must compare
+against the exact SGLang module/callable or another independent source-backed implementation;
+they still require human review.
+
+## 4. Check Submission
+
+After adding one reference test per new definition, run the independent publication gate:
+
+```bash
+flashinfer-bench onboarding check-submission \
+  --run qwen3/20260711
+```
+
+The command always refreshes the remote `flashinfer-ai/flashinfer-trace` main branch before
+checking; a network or refresh failure stops the gate instead of using stale data. This gate
+rejects missing definition/axis/input/output descriptions, unsupported publication tags or
+status values, name conflicts with the current upstream dataset, and missing
+`output/tests/references/test_<definition_name>.py` files. Definitions already present upstream
+are treated as reused dependencies rather than new submissions.
 
 ## Runtime Config
 
@@ -112,28 +159,33 @@ fields are:
 ```json
 {
   "batch_sizes": [1, 2, 4, 8],
-  "max_new_tokens": 64,
+  "max_new_tokens": 16,
   "max_new_workloads": 20,
   "compare_sglang_logger": true,
   "disable_cuda_graph": true,
   "force_flashinfer_backends": true,
   "mem_fraction_static": 0.7,
   "engine_kwargs": {},
-  "inferencex_profiles": ["1k1k"],
-  "inferencex_range_ratio": 0.8,
-  "inferencex_seed": 0
+  "isl": 1024,
+  "osl": 8,
+  "random_range_ratio": 1.0,
+  "seed": 0
 }
 ```
 
-SGLang logger comparison is enabled by default so each definition pass records independent
-operator/output coverage evidence. Set `compare_sglang_logger` to `false` to disable its
-additional logging overhead.
+SGLang logger comparison is enabled by default and needs no separate command. The
+definition pass passes debug logger settings to `sgl.Engine`, summarizes its temporary
+`Pass*.pt` output into `reports/evidence/sglang_logger.json`, compares output signatures,
+then deletes the raw dumps. Set `compare_sglang_logger` to `false` or pass
+`--no-compare-sglang-logger` to disable its additional logging overhead.
 
-`inferencex_profiles` switches the workload stage from ShareGPT text to InferenceX-compatible
-random token requests. Supported fixed-sequence profiles are `1k1k` and `8k1k`; each profile
-is run at every configured `batch_sizes` value with `ignore_eos=true`. This reuses InferenceX
-request shapes for capture coverage. It does not run the InferenceX HTTP throughput benchmark
-or claim official InferenceX performance results.
+Both stages replay the same deterministic synthetic request matrix. It combines 128-token and
+`isl` inputs across every configured batch size, one long request capped at 8192 tokens or one
+quarter of the model context, and one 75% shared-prefix batch. `osl` is the generated-token
+length. `random_range_ratio=1.0` uses exact lengths. The matrix is persisted by
+`dump-definition`; `dump-workload` reuses it instead of accepting a second set of length flags.
+This borrows controllable request shapes from the existing serving benchmark without running its
+HTTP throughput/latency path.
 
 Interrupted Modal calls print a call ID and resume command. Pass that ID through
 `--resume-call-id`; completed `.modal_tmp/` handoff files are removed automatically.

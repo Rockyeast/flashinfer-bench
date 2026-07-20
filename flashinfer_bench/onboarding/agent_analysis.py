@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Any
 
 _PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "definition_analysis.md"
+_REFERENCE_TEST_PROMPT_PATH = (
+    Path(__file__).resolve().parent / "prompts" / "reference_test_analysis.md"
+)
 
 
 def run_definition_analysis(
@@ -23,6 +26,36 @@ def run_definition_analysis(
     completed = subprocess.run(
         [str(codex), "exec", "-C", str(Path.cwd()), "-s", "workspace-write", "--ephemeral", "-"],
         input=prompt,
+        text=True,
+        env=environment,
+        check=False,
+    )
+    return completed.returncode
+
+
+def run_reference_test_analysis(*, run_dir: Path, definitions: list[str], tests_dir: Path) -> int:
+    """Ask Codex to write source-backed non-FI reference tests."""
+    codex = _find_codex_binary()
+    instructions = _REFERENCE_TEST_PROMPT_PATH.read_text(encoding="utf-8").rstrip()
+    context = "\n".join(
+        [
+            "## Task Context",
+            f"Run directory: {run_dir}",
+            f"Published definitions directory: {run_dir / 'output' / 'definitions'}",
+            f"Reviewed definitions directory: {run_dir / 'definitions'}",
+            f"Tests directory: {tests_dir}",
+            "SGLang execution inventory: "
+            f"{run_dir / 'reports' / 'evidence' / 'sglang_execution_inventory.json'}",
+            "",
+            "Definitions requiring tests:",
+            *(f"- {path}" for path in definitions),
+        ]
+    )
+    environment = dict(os.environ)
+    environment["PATH"] = os.pathsep.join([str(codex.parent), environment.get("PATH", "")])
+    completed = subprocess.run(
+        [str(codex), "exec", "-C", str(Path.cwd()), "-s", "workspace-write", "--ephemeral", "-"],
+        input=f"{instructions}\n\n{context}\n",
         text=True,
         env=environment,
         check=False,
@@ -51,8 +84,10 @@ def _analysis_prompt(*, run_dir: Path, model_name: str, report: dict[str, Any], 
             f"Analysis source: {source}",
             "",
             "## Evidence Paths",
-            f"- executed SGLang modules: {run_dir / 'reports' / 'sglang_modules.json'}",
-            f"- SGLang output-logger comparison: {run_dir / 'reports' / 'sglang_logger_report.json'}",
+            "- executed SGLang inventory: "
+            f"{run_dir / 'reports' / 'evidence' / 'sglang_execution_inventory.json'}",
+            "- SGLang output-logger comparison: "
+            f"{run_dir / 'reports' / 'evidence' / 'sglang_logger.json'}",
             "- native FlashInfer definitions already present under definitions/",
             "",
             "## Machine Report",

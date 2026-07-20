@@ -71,13 +71,34 @@ match that path.
 
 - Use `{"type": "var"}` for runtime axes and `{"type": "const", "value": N}` for
   fixed axes.
+- Write a non-empty `description` for the definition and for every axis, input, and output.
+  Missing nested descriptions are submission errors, not advisory warnings.
 - Tensor inputs and outputs require `shape` and `dtype`.
 - Python scalar inputs use `"shape": null`, not an empty shape.
+- Never publish `dtype: "unknown"`. Resolve index-tensor and plan-state dtypes from the
+  traced API, source, or ground-truth test before submission.
+- Input and output names must not overlap. For an in-place kernel, keep the mutated value as
+  an input and declare only the values actually returned by `run(...)` as outputs.
+- Optional inputs use `"optional": true`. Output dtypes inherited from inputs must resolve
+  to a concrete supported dtype before publication.
 - The top-level `reference` must define `run(...)`, preserve source-backed argument order
   and semantics, and return exactly the declared outputs.
 - A `status:verified` native definition keeps the FlashInfer trace-template reference.
 - A reviewed non-FI definition may use a pure PyTorch reference transcribed from the exact
   SGLang source. It must not call the optimized SGLang or FlashInfer kernel.
+
+## Submission Evidence
+
+- Every new published definition requires
+  `output/tests/references/test_<definition_name>.py`.
+- Prefer the matching FlashInfer implementation as test ground truth. Use the exact SGLang
+  implementation only when FlashInfer has no equivalent kernel.
+- The test must exercise the definition's `run(...)`, compare every declared output, and
+  use tolerances appropriate for the declared dtype.
+- Capture-only `sglang_module:`, `sglang_callable:`, and `sglang_input:` tags belong in the
+  evidence sidecar, not in the published definition.
+- Run `check-submission` after workload collection; schema-valid workloads do not by
+  themselves make a definition ready for publication.
 
 ## Final Naming Review
 
@@ -88,3 +109,5 @@ Before finishing, verify for every file:
 3. Are all suffixes semantic variants or constant axes?
 4. Would an existing definition with the same contract already cover it?
 5. Do `op_type`, `name`, directory, filename, axes, and reference agree?
+6. Are all descriptions present and all dtypes concrete?
+7. Does the reference test compare every declared output against valid ground truth?

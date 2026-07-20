@@ -7,7 +7,7 @@ The public workflow is limited to two commands:
 | Command | Input | Stable output | Human decision |
 |---|---|---|---|
 | `dump-definition` | model + runtime config | `definitions/`, definition and SGLang evidence reports | edit/accept definitions |
-| `dump-workload` | reviewed `definitions/` | `output/`, `run_report.json`, `review.md` | accept or revise definitions and rerun |
+| `dump-workload` | reviewed `definitions/` | `output/`, `run_report.json`, `review.md`, reference-test drafts/report | review tests or revise definitions and rerun |
 
 There is no candidate list, merge gate, promote command, proposal/config copy, or separate
 definition transformation stage.
@@ -15,19 +15,29 @@ definition transformation stage.
 ## Complete Example
 
 ```bash
-python3 -B -m flashinfer_bench.onboarding.cli dump-definition \
+flashinfer-bench onboarding dump-definition \
   --run phi_4_mini/20260711 \
   --model-name microsoft/Phi-4-mini-instruct \
   --gpu L40S \
+  --isl 1024 \
+  --osl 8 \
   --agent codex
 
 # Review reports/definition_review.md and edit definitions/ directly.
 
-python3 -B -m flashinfer_bench.onboarding.cli dump-workload \
+flashinfer-bench onboarding dump-workload \
   --run phi_4_mini/20260711 \
-  --inferencex-profile 1k1k
+  --agent codex
 
-# Review reports/review.md.
+# Workload validation and reference-test preparation run automatically.
+# Review reports/review.md, reports/reference_test_report.json, and generated tests.
+
+# Optional standalone rerun of reference-test preparation:
+flashinfer-bench onboarding prepare-reference-tests \
+  --run phi_4_mini/20260711 \
+  --agent codex
+
+# Human-review non-FI tests, then run check-submission.
 ```
 
 The first command may initialize `--image`, `--tp-size`, and `--timeout`. Resolved values
@@ -48,10 +58,11 @@ runs/<model>/<run_id>/
 ├── reports/
 │   ├── definition_report.json
 │   ├── definition_review.md
-│   ├── sglang_modules.json            # executed classes/signatures/source snippets
-│   ├── sglang_logger_report.json      # output-only comparison with SGLang logger
 │   ├── run_report.json
-│   └── review.md
+│   ├── review.md
+│   └── evidence/
+│       ├── sglang_execution_inventory.json  # executed classes/signatures/source
+│       └── sglang_logger.json               # output-signature comparison
 └── .modal_tmp/                        # interrupted-call handoff; removed after success
 ```
 
@@ -59,15 +70,18 @@ runs/<model>/<run_id>/
 
 ## Definition Evidence and Review
 
-`dump-definition` uses one prompt and one generated token. It gathers:
+`dump-definition` runs the bounded synthetic matrix later replayed by `dump-workload`. It gathers:
 
 1. Native FlashInfer definition JSON from `FLASHINFER_TRACE_DUMP=1`.
 2. Exact SGLang module classes that execute in the Modal parent or SGLang workers.
-3. An optional bounded SGLang built-in tensor logger dump for output-surface comparison,
-   enabled explicitly with `--compare-sglang-logger` on compatible models.
+3. A bounded SGLang built-in tensor logger dump for output-surface comparison, enabled by
+   default in the same model pass. Its output type/shape/dtype signatures are compared with
+   tracing inventory; pass `--no-compare-sglang-logger` to disable it.
 
-The SGLang tensor logger is not a workload backend. It records module outputs, while an
-executable workload needs the exact inputs described by a Definition.
+The SGLang tensor logger is not a workload backend and needs no separate invocation. The
+pipeline configures it through `sgl.Engine`, summarizes and removes its temporary tensor
+dumps, and writes the comparison to `reports/evidence/sglang_logger.json`. It records module
+outputs, while an executable workload needs the exact inputs described by a Definition.
 
 The deterministic review verifies formal `Definition` schema, path/name consistency,
 reference output count, GQA invariants, and one of these mutually exclusive capture tags:
@@ -105,11 +119,14 @@ Each process writes a private non-FI shard. The parent merges shards, keeps at m
 workload per unique axes combination, caps each definition at `max_new_workloads`, and
 writes the standard `definitions/workloads/blob` layout.
 
-`--inferencex-profile 1k1k` replaces ShareGPT prompts in the workload stage with deterministic
-random token IDs using InferenceX's fixed 1024-input/1024-output shape, 0.8 length range, and
-`ignore_eos=true`. Repeat the option with `8k1k` to add 8192-input/1024-output coverage. The
-requests run directly through the in-process SGLang Engine; this is shape coverage, not the
-official InferenceX HTTP concurrency and throughput benchmark.
+The shared request matrix covers 128-token and `--isl` inputs at each configured batch size,
+one long-context request capped at 8192 tokens or one quarter of model context, and one 75%
+shared-prefix batch. `--osl` controls generated tokens and defaults to 8.
+`--random-range-ratio` optionally samples between a fraction and 100% of each target; the default
+`1.0` uses exact lengths. Configure these on `dump-definition`; `dump-workload` reuses the saved
+values so discovery and collection execute identical request shapes and seeds. Requests run
+directly through the in-process SGLang Engine with `ignore_eos=true`; serving throughput
+benchmarks remain in `examples/sglang_bench/bench_serving.py`.
 
 The run is accepted only when every collectable definition has a workload and the canonical
 dataset validator passes. A definition with no supported capture tag remains visible in
@@ -149,7 +166,8 @@ cli.py
        -> sglang_runner.py
        -> tracing/flashinfer_logging.py -> tracing/sanitize.py
        -> tracing/sglang_logging.py -> tracing/TracingRuntime
-  -> validation.py
+  -> workload_stage.py -> data.validate
+  -> submission.py
 ```
 
 `modal_app.py` is only the platform boundary. The two-stage runner chooses capture backends;

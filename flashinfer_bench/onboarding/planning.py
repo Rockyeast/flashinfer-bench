@@ -2,14 +2,7 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Any
-
-DEFAULT_SHAREGPT_PATH = Path("sharegpt_100.json")
-PACKAGE_SHAREGPT_PATH = Path(__file__).resolve().parent / "sharegpt_100.json"
-INFERENCEX_PROFILES = {"1k1k": (1024, 1024), "8k1k": (8192, 1024)}
-DEFAULT_INFERENCEX_RANGE_RATIO = 0.8
 
 
 def build_stage_plan(
@@ -29,23 +22,16 @@ def build_stage_plan(
     tp_size = _positive_int(config.get("tp_size"), "tp_size")
     max_new_tokens = _positive_int(config.get("max_new_tokens"), "max_new_tokens")
     batch_sizes = _positive_int_list(config.get("batch_sizes"), "batch_sizes")
-    inferencex_profiles = _inferencex_profiles(config.get("inferencex_profiles"))
-    if stage == "workloads" and inferencex_profiles:
-        prompt_scenarios = _build_inferencex_scenarios(
-            profiles=inferencex_profiles,
-            batch_sizes=batch_sizes,
-            range_ratio=_ratio(
-                config.get("inferencex_range_ratio", DEFAULT_INFERENCEX_RANGE_RATIO),
-                "inferencex_range_ratio",
-            ),
-            seed=_integer(config.get("inferencex_seed", 0), "inferencex_seed"),
-        )
-    else:
-        prompt_scenarios = _build_prompt_scenarios(
-            prompts=_load_prompts(_sharegpt_path()),
-            batch_sizes=batch_sizes,
-            max_new_tokens=max_new_tokens,
-        )
+    request_scenarios = _build_synthetic_scenarios(
+        medium_input_len=_positive_int(config.get("isl", 1024), "isl"),
+        output_len=_positive_int(config.get("osl", 8), "osl"),
+        batch_sizes=batch_sizes,
+        range_ratio=_ratio(
+            config.get("random_range_ratio", 1.0),
+            "random_range_ratio",
+        ),
+        seed=_integer(config.get("seed", 0), "seed"),
+    )
     plan = {
         "stage": stage,
         "model_name": model_name,
@@ -58,7 +44,7 @@ def build_stage_plan(
         },
         "pass_modes": pass_modes or ["default"],
         "page_sizes": page_sizes or [],
-        "prompt_scenarios": prompt_scenarios,
+        "request_scenarios": request_scenarios,
         "sampling": {"max_new_tokens": max_new_tokens},
         "supplemental_runs": _supplemental_runs(config.get("supplemental_runs")),
         "sglang": {
@@ -71,6 +57,11 @@ def build_stage_plan(
             "compare_tensor_logger": bool(config.get("compare_sglang_logger", True)),
         },
     }
+    logger_layers = config.get("sglang_logger_layers")
+    if logger_layers is not None:
+        plan["sglang"]["logger_layers"] = _non_negative_int_list(
+            logger_layers, "sglang_logger_layers"
+        )
     if reviewed_definitions is not None:
         plan["reviewed_definitions"] = reviewed_definitions
         plan["max_new_workloads"] = _positive_int(
@@ -79,88 +70,89 @@ def build_stage_plan(
     return plan
 
 
-def _sharegpt_path() -> Path:
-    return DEFAULT_SHAREGPT_PATH if DEFAULT_SHAREGPT_PATH.exists() else PACKAGE_SHAREGPT_PATH
-
-
-def _load_prompts(path: Path) -> list[str]:
-    if not path.exists():
-        raise ValueError(f"prompt dataset does not exist: {path}")
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, list):
-        raise ValueError(f"prompt dataset must be a JSON list: {path}")
-    prompts = [item.strip() for item in value if isinstance(item, str) and item.strip()]
-    if not prompts:
-        raise ValueError(f"prompt dataset contains no prompts: {path}")
-    return prompts
-
-
-def _build_prompt_scenarios(
-    *, prompts: list[str], batch_sizes: list[int], max_new_tokens: int
+def _build_synthetic_scenarios(
+    *,
+    medium_input_len: int,
+    output_len: int,
+    batch_sizes: list[int],
+    range_ratio: float,
+    seed: int,
 ) -> list[dict[str, Any]]:
-    ranked = sorted(prompts, key=len)
-    scenarios = []
-    for scenario_index, batch_size in enumerate(batch_sizes):
-        if batch_size <= 1:
-            pool = ranked[-max(len(ranked) // 4, 1) :]
-            token_limit = 96
-        elif batch_size <= 4:
-            start = len(ranked) // 4
-            end = max(len(ranked) * 3 // 4, start + batch_size)
-            pool = ranked[start : min(end, len(ranked))] or ranked
-            token_limit = 64
-        elif batch_size <= 16:
-            pool = ranked[: max(batch_size, len(ranked) // 2, 1)]
-            token_limit = 32
-        else:
-            pool = ranked[: max(len(ranked) // 4, 1)]
-            token_limit = 8
-        batch = [pool[(scenario_index * 7 + index) % len(pool)] for index in range(batch_size)]
-        scenarios.append(
-            {
-                "name": f"batch_{batch_size}",
-                "prompts": batch,
-                "max_new_tokens": min(max_new_tokens, token_limit),
-            }
-        )
-    return scenarios
-
-
-def _build_inferencex_scenarios(
-    *, profiles: list[str], batch_sizes: list[int], range_ratio: float, seed: int
-) -> list[dict[str, Any]]:
-    scenarios = []
-    for profile_index, profile in enumerate(profiles):
-        input_len, output_len = INFERENCEX_PROFILES[profile]
-        for batch_index, batch_size in enumerate(batch_sizes):
+    """Return the bounded request matrix used by both pipeline stages."""
+    scenarios: list[dict[str, Any]] = []
+    input_lengths = list(dict.fromkeys((128, medium_input_len)))
+    scenario_index = 0
+    for input_len in input_lengths:
+        for batch_size in batch_sizes:
             scenarios.append(
-                {
-                    "name": f"inferencex_{profile}_bs{batch_size}",
-                    "source": "inferencex",
-                    "profile": profile,
-                    "input_len": input_len,
-                    "output_len": output_len,
-                    "batch_size": batch_size,
-                    "range_ratio": range_ratio,
-                    "seed": seed + profile_index * len(batch_sizes) + batch_index,
-                }
+                _synthetic_scenario(
+                    name=f"tokens_i{input_len}_o{output_len}_bs{batch_size}",
+                    input_len=input_len,
+                    output_len=output_len,
+                    batch_size=batch_size,
+                    range_ratio=range_ratio,
+                    seed=seed + scenario_index,
+                )
             )
+            scenario_index += 1
+
+    scenarios.append(
+        _synthetic_scenario(
+            name=f"long_context_max8192_o{output_len}_bs1",
+            input_len=8192,
+            output_len=output_len,
+            batch_size=1,
+            range_ratio=range_ratio,
+            seed=seed + scenario_index,
+            context_fraction=0.25,
+        )
+    )
+    scenario_index += 1
+
+    shared_batch_size = max((size for size in batch_sizes if size <= 8), default=1)
+    shared_input_len = max(medium_input_len, 128)
+    scenarios.append(
+        _synthetic_scenario(
+            name=(
+                f"shared_prefix_i{shared_input_len}_p{shared_input_len * 3 // 4}_"
+                f"o{output_len}_bs{shared_batch_size}"
+            ),
+            input_len=shared_input_len,
+            output_len=output_len,
+            batch_size=shared_batch_size,
+            range_ratio=1.0,
+            seed=seed + scenario_index,
+            shared_prefix_len=shared_input_len * 3 // 4,
+        )
+    )
     return scenarios
 
 
-def _inferencex_profiles(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if not isinstance(value, list) or not value:
-        raise ValueError("inferencex_profiles must be a non-empty list")
-    profiles = []
-    for index, item in enumerate(value):
-        if item not in INFERENCEX_PROFILES:
-            choices = ", ".join(sorted(INFERENCEX_PROFILES))
-            raise ValueError(f"inferencex_profiles[{index}] must be one of: {choices}")
-        if item not in profiles:
-            profiles.append(item)
-    return profiles
+def _synthetic_scenario(
+    *,
+    name: str,
+    input_len: int,
+    output_len: int,
+    batch_size: int,
+    range_ratio: float,
+    seed: int,
+    context_fraction: float | None = None,
+    shared_prefix_len: int | None = None,
+) -> dict[str, Any]:
+    scenario: dict[str, Any] = {
+        "name": name,
+        "source": "synthetic",
+        "input_len": input_len,
+        "output_len": output_len,
+        "batch_size": batch_size,
+        "range_ratio": range_ratio,
+        "seed": seed,
+    }
+    if context_fraction is not None:
+        scenario["context_fraction"] = context_fraction
+    if shared_prefix_len is not None:
+        scenario["shared_prefix_len"] = shared_prefix_len
+    return scenario
 
 
 def _supplemental_runs(value: Any) -> list[dict[str, Any]]:
@@ -230,3 +222,15 @@ def _positive_int_list(value: Any, field: str) -> list[int]:
     if not isinstance(value, list) or not value:
         raise ValueError(f"{field} must be a non-empty list")
     return [_positive_int(item, f"{field}[{index}]") for index, item in enumerate(value)]
+
+
+def _non_negative_int_list(value: Any, field: str) -> list[int]:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{field} must be a non-empty list")
+    result: list[int] = []
+    for index, item in enumerate(value):
+        if type(item) is not int or item < 0:
+            raise ValueError(f"{field}[{index}] must be a non-negative integer")
+        if item not in result:
+            result.append(item)
+    return result

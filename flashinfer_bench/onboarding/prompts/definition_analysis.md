@@ -30,13 +30,17 @@ existing and newly written non-FI definition before finishing.
 - Every collectable definition must choose exactly one backend.
 - For FlashInfer, use `fi_api:<exact decorated callable>`; never tag a wrapper class.
 - For non-FI torch modules, use
-  `sglang_module:<exact fully-qualified class observed in sglang_modules.json>`.
+  `sglang_module:<exact fully-qualified class observed in
+  reports/evidence/sglang_execution_inventory.json>`.
 - For non-FI plain functions, use `sglang_callable:<exact fully-qualified callable>` only
   with source evidence.
 - For non-FI definitions, never put the current model family, framework, or class name in
   `name` or `op_type`. Name the observable semantic behavior and use `model:<slug>` only as
   provenance.
 - Definition input names default to forward or callable argument names.
+- Infer every input dtype from runtime evidence or the source callable contract. Do not
+  assume module attributes use the model activation dtype; current SGLang rotary CUDA
+  kernels require a `float32` cosine-sine cache even when query/key use `bfloat16`.
 - If names differ, add
   `sglang_input:<definition_input>=arg:<runtime_argument>`.
 - If an observed forward signature is `(*args, **kwargs)`, map positional tensors with
@@ -47,7 +51,15 @@ existing and newly written non-FI definition before finishing.
 - SGLang's tensor logger records outputs and is comparison evidence, not sufficient workload
   input evidence.
 - Keep the formal Definition schema and a top-level reference `run(...)` function.
+- Write a non-empty `description` for the definition and for every axis, input, and output.
+  The submission gate treats missing descriptions as errors, not warnings.
 - The reference `run(...)` return count must equal the declared outputs count.
 - For GQA, verify query and KV head counts and keep encoded name axes in sync.
 - Do not edit `config/`, `output/`, `reports/`, tests, or repository source.
 - Do not run Modal and do not invent source evidence.
+- `sglang_module:`, `sglang_callable:`, `sglang_input:`, and
+  `status:source_reviewed` are capture-only metadata. Workload export moves them to
+  `reports/evidence/capture_metadata.json`; they must not appear in submitted definitions.
+- This analysis stage does not create reference tests. Before submission, add
+  `output/tests/references/test_<definition_name>.py` for every new definition and run
+  `check-submission`.
