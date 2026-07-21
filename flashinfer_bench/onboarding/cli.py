@@ -40,22 +40,6 @@ def add_cli_subcommands(subparsers: Any) -> None:
         "--overwrite", action="store_true", help="Replace an existing definitions/ directory."
     )
     definitions.add_argument(
-        "--compare-sglang-logger",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Enable or disable SGLang module input/output comparison (enabled by default).",
-    )
-    definitions.add_argument(
-        "--sglang-logger-layer",
-        dest="sglang_logger_layers",
-        action="append",
-        type=int,
-        help=(
-            "Decoder layer to include in the SGLang dumper; repeat for multiple "
-            "representative layers. By default, one layer per HF layer_types value is used."
-        ),
-    )
-    definitions.add_argument(
         "--isl",
         type=int,
         help="Medium synthetic input length; the bounded matrix also includes 128 and long context.",

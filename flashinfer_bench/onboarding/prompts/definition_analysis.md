@@ -48,8 +48,9 @@ existing and newly written non-FI definition before finishing.
   describe those positions.
 - Module attributes may use
   `sglang_input:<definition_input>=attr:<attribute_path>`.
-- SGLang's tensor logger records outputs and is comparison evidence, not sufficient workload
-  input evidence.
+- Definition analysis uses executed module paths and signatures from the inventory. During the
+  later workload stage, SGLang Dumper captures raw inputs for reviewed `sglang_module:`
+  definitions; do not invent Dumper evidence during definition analysis.
 - Keep the formal Definition schema and a top-level reference `run(...)` function.
 - Write a non-empty `description` for the definition and for every axis, input, and output.
   The submission gate treats missing descriptions as errors, not warnings.

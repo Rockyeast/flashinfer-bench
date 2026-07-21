@@ -86,8 +86,6 @@ def _analysis_prompt(*, run_dir: Path, model_name: str, report: dict[str, Any], 
             "## Evidence Paths",
             "- executed SGLang inventory: "
             f"{run_dir / 'reports' / 'evidence' / 'sglang_execution_inventory.json'}",
-            "- SGLang output-logger comparison: "
-            f"{run_dir / 'reports' / 'evidence' / 'sglang_logger.json'}",
             "- native FlashInfer definitions already present under definitions/",
             "",
             "## Machine Report",

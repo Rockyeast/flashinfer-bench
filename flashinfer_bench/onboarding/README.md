@@ -33,19 +33,14 @@ runs/qwen3/20260711/
     ├── definition_review.md
     └── evidence/
         ├── sglang_execution_inventory.json
-        └── sglang_logger.json
+        └── request_manifest.json
 ```
 
-Three evidence sources are combined:
+Two evidence sources are combined:
 
 - FlashInfer native definition tracing writes `fi_api:` definitions.
 - A worker bootstrap records the exact SGLang module classes, forward signatures, sample
   input shapes, and bounded source snippets that actually executed.
-- SGLang's built-in generic dumper is enabled by default. In a bounded comparison pass it
-  records representative-layer module inputs and outputs. Complete module paths are compared
-  with tracing inventory first; tensor signatures are only a weak fallback. This remains
-  comparison evidence and does not create workloads. Pass
-  `--no-compare-sglang-logger` to disable it.
 
 With `--agent codex`, the agent reads this evidence and writes Definition JSON directly.
 It may preserve native FI definitions or add non-FI definitions; it does not create a
@@ -163,7 +158,6 @@ fields are:
   "batch_sizes": [1, 2, 4, 8],
   "max_new_tokens": 16,
   "max_new_workloads": 20,
-  "compare_sglang_logger": true,
   "disable_cuda_graph": true,
   "force_flashinfer_backends": true,
   "mem_fraction_static": 0.7,
@@ -175,12 +169,9 @@ fields are:
 }
 ```
 
-SGLang logger comparison is enabled by default and needs no separate command. The
-definition pass enables SGLang's generic dumper through `DUMPER_*` environment variables,
-summarizes its temporary input/output dumps into `reports/evidence/sglang_logger.json`,
-compares complete module paths and tensor signatures, then deletes the raw dumps. Set
-`compare_sglang_logger` to `false` or pass
-`--no-compare-sglang-logger` to disable its additional logging overhead.
+During `dump-workload`, SGLang's generic dumper is enabled only for reviewed
+`sglang_module:` definitions. Its raw inputs are adapted into the existing
+`TracingRuntime`; raw dumper files are temporary and are not a separate report.
 
 Both stages replay the same deterministic synthetic request matrix. It combines 128-token and
 `isl` inputs across every configured batch size, one long request capped at 8192 tokens or one

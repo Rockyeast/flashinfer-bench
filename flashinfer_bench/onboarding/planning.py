@@ -54,14 +54,8 @@ def build_stage_plan(
             "mem_fraction_static": float(config.get("mem_fraction_static", 0.7)),
             "cuda_graph_max_bs": config.get("cuda_graph_max_bs"),
             "engine_kwargs": _engine_kwargs(config.get("engine_kwargs")),
-            "compare_tensor_logger": bool(config.get("compare_sglang_logger", True)),
         },
     }
-    logger_layers = config.get("sglang_logger_layers")
-    if logger_layers is not None:
-        plan["sglang"]["logger_layers"] = _non_negative_int_list(
-            logger_layers, "sglang_logger_layers"
-        )
     if reviewed_definitions is not None:
         plan["reviewed_definitions"] = reviewed_definitions
         plan["max_new_workloads"] = _positive_int(
@@ -222,15 +216,3 @@ def _positive_int_list(value: Any, field: str) -> list[int]:
     if not isinstance(value, list) or not value:
         raise ValueError(f"{field} must be a non-empty list")
     return [_positive_int(item, f"{field}[{index}]") for index, item in enumerate(value)]
-
-
-def _non_negative_int_list(value: Any, field: str) -> list[int]:
-    if not isinstance(value, list) or not value:
-        raise ValueError(f"{field} must be a non-empty list")
-    result: list[int] = []
-    for index, item in enumerate(value):
-        if type(item) is not int or item < 0:
-            raise ValueError(f"{field}[{index}] must be a non-negative integer")
-        if item not in result:
-            result.append(item)
-    return result

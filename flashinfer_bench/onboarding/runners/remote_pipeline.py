@@ -22,13 +22,11 @@ from flashinfer_bench.tracing.sanitize import sanitize_dumps
 from flashinfer_bench.tracing.sglang_logging import (
     adapt_sglang_dumper_workloads,
     build_sglang_dumper_workload_filter,
-    compare_sglang_logger_inventory,
     load_sglang_definition_files,
     merge_sglang_workload_shards,
     sglang_capture_environment,
     summarize_module_inventory,
     summarize_sglang_capture_status,
-    summarize_sglang_dumper,
 )
 
 DEFAULT_REMOTE_OUTPUT_DIR = "/tmp/flashinfer-bench-onboarding"
@@ -56,162 +54,26 @@ def run_remote_stage(
 def _dump_definitions(plan: dict[str, Any], output_dir: Path) -> dict[str, Any]:
     definitions_dir = output_dir / "definitions"
     capture_root = output_dir / "sglang_capture"
-    logger_root = output_dir / "sglang_logger"
-    execution_plan = dict(plan)
-    sglang_config = dict(execution_plan.get("sglang") or {})
-    compare_tensor_logger = bool(sglang_config.pop("compare_tensor_logger", False))
-    logger_layers: list[int] = []
-    if compare_tensor_logger:
-        logger_layers = _representative_logger_layers(execution_plan)
-    execution_plan["sglang"] = sglang_config
     with (
         flashinfer_definition_dump(definitions_dir),
         sglang_capture_environment(capture_root, mode="inventory"),
     ):
-        request_manifest = run_sglang_model(execution_plan)
-        logger_request_manifest = None
-        if compare_tensor_logger:
-            logger_plan = _logger_comparison_plan(
-                execution_plan,
-                output_dir=logger_root,
-                logger_layers=logger_layers,
-            )
-            logger_request_manifest = run_sglang_model(logger_plan)
+        request_manifest = run_sglang_model(plan)
 
     files = sorted(definitions_dir.rglob("*.json"))
     module_inventory = summarize_module_inventory(capture_root)
     module_inventory["request_provenance"] = _request_provenance(request_manifest)
-    sglang_logger = summarize_sglang_dumper(logger_root)
-    sglang_logger["enabled"] = compare_tensor_logger
-    sglang_logger["layers"] = logger_layers
-    sglang_logger["comparison"] = compare_sglang_logger_inventory(
-        sglang_logger, module_inventory
-    )
-    if logger_request_manifest is not None:
-        sglang_logger["request_provenance"] = _request_provenance(
-            logger_request_manifest
-        )
-    if not compare_tensor_logger:
-        sglang_logger["note"] = (
-            "SGLang's input/output dumper was disabled for this run. "
-            "Remove --no-compare-sglang-logger or set compare_sglang_logger=true "
-            "to enable it."
-        )
     shutil.rmtree(capture_root, ignore_errors=True)
-    shutil.rmtree(logger_root, ignore_errors=True)
     return {
         "stage": "definitions",
         "definitions_archive_b64": _archive_dir_b64(definitions_dir, arcname="definitions"),
         "request_manifest": request_manifest,
         "module_inventory": module_inventory,
-        "sglang_logger": sglang_logger,
         "summary": {
             "definitions": len(files),
-            "model_passes": 2 if compare_tensor_logger else 1,
             "sglang_modules": module_inventory["summary"]["modules"],
-            "sglang_logger_operators": sglang_logger["summary"]["operators"],
-            "sglang_logger_path_matches": sglang_logger["comparison"]["summary"][
-                "path_matched_logger_operators"
-            ],
-            "sglang_logger_signature_fallback_matches": sglang_logger["comparison"][
-                "summary"
-            ]["signature_fallback_matched_logger_operators"],
         },
     }
-
-
-def _logger_comparison_plan(
-    plan: dict[str, Any], *, output_dir: Path, logger_layers: list[int]
-) -> dict[str, Any]:
-    """Keep SGLang's input/output dumper bounded to one short representative request."""
-    scenarios = plan.get("request_scenarios")
-    if not isinstance(scenarios, list) or not scenarios:
-        raise ValueError("definition stage requires request_scenarios")
-    scenario = dict(scenarios[0])
-    scenario.update(
-        {
-            "name": "sglang_logger_short_probe",
-            "input_len": min(int(scenario.get("input_len") or 128), 128),
-            "output_len": 1,
-            "batch_size": 1,
-            "range_ratio": 1.0,
-        }
-    )
-    scenario.pop("context_fraction", None)
-    scenario.pop("shared_prefix_len", None)
-    logger_plan = dict(plan)
-    logger_plan["request_scenarios"] = [scenario]
-    logger_plan["sampling"] = {"max_new_tokens": 1}
-    logger_plan["supplemental_runs"] = []
-    sglang_config = dict(plan.get("sglang") or {})
-    sglang_config["dumper_output_dir"] = str(output_dir)
-    sglang_config["dumper_layers"] = logger_layers
-    logger_plan["sglang"] = sglang_config
-    return logger_plan
-
-
-def _representative_logger_layers(plan: dict[str, Any]) -> list[int]:
-    """Choose one logger layer per distinct HF layer type."""
-    sglang_config = plan.get("sglang")
-    if not isinstance(sglang_config, dict):
-        sglang_config = {}
-    configured = sglang_config.get("logger_layers")
-    if isinstance(configured, list) and configured and all(
-        type(item) is int and item >= 0 for item in configured
-    ):
-        return list(dict.fromkeys(configured))
-
-    model_config = _embedded_model_config(sglang_config)
-    if model_config is None:
-        try:
-            from transformers import AutoConfig
-
-            loaded = AutoConfig.from_pretrained(
-                str(plan.get("model_name") or ""), trust_remote_code=True
-            )
-            model_config = loaded.to_dict()
-        except Exception as exc:
-            print(
-                "[flashinfer_bench.onboarding] could not inspect HF layer types; "
-                f"using SGLang logger layer 0: {exc}",
-                flush=True,
-            )
-            return [0]
-
-    layer_types = _find_layer_types(model_config)
-    if not layer_types:
-        return [0]
-    first_by_type: dict[str, int] = {}
-    for index, layer_type in enumerate(layer_types):
-        if isinstance(layer_type, str) and layer_type:
-            first_by_type.setdefault(layer_type, index)
-    return list(first_by_type.values()) or [0]
-
-
-def _embedded_model_config(sglang_config: dict[str, Any]) -> dict[str, Any] | None:
-    engine_kwargs = sglang_config.get("engine_kwargs")
-    if not isinstance(engine_kwargs, dict):
-        return None
-    raw = engine_kwargs.get("decrypted_config_json")
-    if not isinstance(raw, str) or not raw:
-        return None
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    return value if isinstance(value, dict) else None
-
-
-def _find_layer_types(value: dict[str, Any]) -> list[Any] | None:
-    layer_types = value.get("layer_types")
-    if isinstance(layer_types, list) and layer_types:
-        return layer_types
-    for child in value.values():
-        if isinstance(child, dict):
-            found = _find_layer_types(child)
-            if found:
-                return found
-    return None
 
 
 def _dump_workloads(plan: dict[str, Any], output_dir: Path) -> dict[str, Any]:

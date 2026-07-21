@@ -62,7 +62,7 @@ runs/<model>/<run_id>/
 │   ├── review.md
 │   └── evidence/
 │       ├── sglang_execution_inventory.json  # executed classes/signatures/source
-│       └── sglang_logger.json               # module-path + input/output comparison
+│       └── request_manifest.json             # exact requests replayed by both stages
 └── .modal_tmp/                        # interrupted-call handoff; removed after success
 ```
 
@@ -74,15 +74,11 @@ runs/<model>/<run_id>/
 
 1. Native FlashInfer definition JSON from `FLASHINFER_TRACE_DUMP=1`.
 2. Exact SGLang module classes that execute in the Modal parent or SGLang workers.
-3. A bounded SGLang generic-dumper pass for module input/output comparison. Complete module
-   paths are compared with tracing inventory first; tensor signatures are a weak fallback.
-   Pass `--no-compare-sglang-logger` to disable it.
 
-The SGLang dumper needs no separate invocation. The pipeline enables it with `DUMPER_*`
-environment variables. During definition discovery, its input/output dumps provide comparison
-evidence in `reports/evidence/sglang_logger.json`. During workload collection, reviewed
-`sglang_module:` definitions reuse the dumper's raw module inputs; a thin adapter adds the exact
-Definition, module path, and attribute bindings before calling the existing `TracingRuntime`.
+During workload collection, the pipeline enables SGLang Dumper only for reviewed
+`sglang_module:` definitions. Raw module inputs are combined with the exact Definition,
+module path, and attribute bindings before calling the existing `TracingRuntime`. No extra
+definition-stage comparison pass or logger report is produced.
 
 The deterministic review verifies formal `Definition` schema, path/name consistency,
 reference output count, GQA invariants, and one of these mutually exclusive capture tags:

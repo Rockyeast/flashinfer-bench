@@ -264,32 +264,6 @@ def render_definition_review(report: dict[str, Any]) -> str:
         if items:
             lines.extend(["", f"## {heading}", ""])
             lines.extend(f"- `{item['path']}`: {item['reason']}" for item in items)
-    comparison = report.get("sglang_logger_comparison")
-    comparison_summary = comparison.get("summary") if isinstance(comparison, dict) else None
-    if isinstance(comparison_summary, dict):
-        lines.extend(
-            [
-                "",
-                "## SGLang Logger Comparison",
-                "",
-                "Module identity is matched by complete module instance path; output "
-                "signature is only a weak fallback.",
-                "",
-                f"- logger operators: {comparison_summary.get('logger_operators', 0)}",
-                "- module-path matches: "
-                f"{comparison_summary.get('path_matched_logger_operators', 0)}",
-                "- input-signature matches: "
-                f"{comparison_summary.get('input_signature_matched_logger_operators', 0)}",
-                "- output-signature matches: "
-                f"{comparison_summary.get('output_signature_matched_logger_operators', 0)}",
-                "- output-signature fallback matches: "
-                f"{comparison_summary.get('signature_fallback_matched_logger_operators', 0)}",
-                f"- logger-only operators: {comparison_summary.get('logger_only_operators', 0)}",
-                f"- tracing-only modules: {comparison_summary.get('tracing_only_modules', 0)}",
-                f"- ambiguous matches: {comparison_summary.get('ambiguous_logger_operators', 0)}",
-                "- details: `reports/evidence/sglang_logger.json#comparison`",
-            ]
-        )
     lines.extend(
         [
             "",

@@ -36,8 +36,6 @@ RUN_CONFIG_KEYS = {
     "cuda_graph_max_bs",
     "engine_kwargs",
     "max_new_workloads",
-    "compare_sglang_logger",
-    "sglang_logger_layers",
     "isl",
     "osl",
     "random_range_ratio",
@@ -110,14 +108,8 @@ def resolve_config(args: argparse.Namespace, run_path: Path) -> dict[str, Any]:
                 _runtime_value(args, config, "random_range_ratio", 1.0)
             ),
             "seed": int(_runtime_value(args, config, "seed", 0)),
-            "compare_sglang_logger": bool(
-                _runtime_value(args, config, "compare_sglang_logger", True)
-            ),
         }
     )
-    logger_layers = _runtime_value(args, config, "sglang_logger_layers")
-    if logger_layers is not None:
-        resolved["sglang_logger_layers"] = logger_layers
     if resolved["tp_size"] < 1:
         raise SystemExit("ERROR: tp_size must be at least 1")
     path = run_path / "config" / "run_config.json"
@@ -212,12 +204,6 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def write_definition_review(run_path: Path, report: dict[str, Any]) -> None:
     reports_dir = run_path / "reports"
-    logger_report_path = reports_dir / "evidence" / "sglang_logger.json"
-    if logger_report_path.exists():
-        logger_report = json.loads(logger_report_path.read_text(encoding="utf-8"))
-        comparison = logger_report.get("comparison") if isinstance(logger_report, dict) else None
-        if isinstance(comparison, dict):
-            report["sglang_logger_comparison"] = comparison
     write_json(reports_dir / "definition_report.json", report)
     (reports_dir / "definition_review.md").write_text(
         render_definition_review(report), encoding="utf-8"
