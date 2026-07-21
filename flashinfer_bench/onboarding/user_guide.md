@@ -62,7 +62,7 @@ runs/<model>/<run_id>/
 │   ├── review.md
 │   └── evidence/
 │       ├── sglang_execution_inventory.json  # executed classes/signatures/source
-│       └── sglang_logger.json               # output-signature comparison
+│       └── sglang_logger.json               # module-path + input/output comparison
 └── .modal_tmp/                        # interrupted-call handoff; removed after success
 ```
 
@@ -74,14 +74,15 @@ runs/<model>/<run_id>/
 
 1. Native FlashInfer definition JSON from `FLASHINFER_TRACE_DUMP=1`.
 2. Exact SGLang module classes that execute in the Modal parent or SGLang workers.
-3. A bounded SGLang built-in tensor logger dump for output-surface comparison, enabled by
-   default in the same model pass. Its output type/shape/dtype signatures are compared with
-   tracing inventory; pass `--no-compare-sglang-logger` to disable it.
+3. A bounded SGLang generic-dumper pass for module input/output comparison. Complete module
+   paths are compared with tracing inventory first; tensor signatures are a weak fallback.
+   Pass `--no-compare-sglang-logger` to disable it.
 
-The SGLang tensor logger is not a workload backend and needs no separate invocation. The
-pipeline configures it through `sgl.Engine`, summarizes and removes its temporary tensor
-dumps, and writes the comparison to `reports/evidence/sglang_logger.json`. It records module
-outputs, while an executable workload needs the exact inputs described by a Definition.
+The SGLang dumper needs no separate invocation. The pipeline enables it with `DUMPER_*`
+environment variables. During definition discovery, its input/output dumps provide comparison
+evidence in `reports/evidence/sglang_logger.json`. During workload collection, reviewed
+`sglang_module:` definitions reuse the dumper's raw module inputs; a thin adapter adds the exact
+Definition, module path, and attribute bindings before calling the existing `TracingRuntime`.
 
 The deterministic review verifies formal `Definition` schema, path/name consistency,
 reference output count, GQA invariants, and one of these mutually exclusive capture tags:
@@ -112,8 +113,11 @@ same SGLang inference pass:
 
 - FI: `flashinfer_bench.tracing.flashinfer_logging` configures the native logger and
   `flashinfer_bench.tracing.sanitize` converts dumps.
-- non-FI: a temporary worker bootstrap installs reviewed SGLang module/callable hooks and
-  sends captured inputs to the existing `TracingRuntime`.
+- non-FI modules: SGLang's generic dumper captures raw module arguments; a thin worker hook
+  records only Definition/path/attribute bindings, and the adapter sends the merged inputs to
+  the existing `TracingRuntime`.
+- non-FI plain callables: the worker bootstrap keeps the reviewed callable wrapper because the
+  generic dumper only hooks `torch.nn.Module` instances.
 
 Each process writes a private non-FI shard. The parent merges shards, keeps at most one
 workload per unique axes combination, caps each definition at `max_new_workloads`, and

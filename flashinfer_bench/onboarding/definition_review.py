@@ -272,14 +272,16 @@ def render_definition_review(report: dict[str, Any]) -> str:
                 "",
                 "## SGLang Logger Comparison",
                 "",
-                "Module identity is matched by process id and complete module instance path "
-                "when available; output signature is only a weak fallback.",
+                "Module identity is matched by complete module instance path; output "
+                "signature is only a weak fallback.",
                 "",
                 f"- logger operators: {comparison_summary.get('logger_operators', 0)}",
-                "- exact process + module-path matches: "
-                f"{comparison_summary.get('exact_identity_matched_logger_operators', 0)}",
-                "- module-path matches across processes: "
+                "- module-path matches: "
                 f"{comparison_summary.get('path_matched_logger_operators', 0)}",
+                "- input-signature matches: "
+                f"{comparison_summary.get('input_signature_matched_logger_operators', 0)}",
+                "- output-signature matches: "
+                f"{comparison_summary.get('output_signature_matched_logger_operators', 0)}",
                 "- output-signature fallback matches: "
                 f"{comparison_summary.get('signature_fallback_matched_logger_operators', 0)}",
                 f"- logger-only operators: {comparison_summary.get('logger_only_operators', 0)}",

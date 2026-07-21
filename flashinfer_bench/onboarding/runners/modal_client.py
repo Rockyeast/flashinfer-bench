@@ -72,6 +72,7 @@ def run_modal_stage(
     command = [
         "modal",
         "run",
+        "--detach",
         "-m",
         "flashinfer_bench.onboarding.runners.modal_app::stage",
         "--plan-path",

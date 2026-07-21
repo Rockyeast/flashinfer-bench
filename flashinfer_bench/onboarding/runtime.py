@@ -13,6 +13,7 @@ from typing import Any
 from flashinfer_bench.onboarding.definition_review import render_definition_review
 from flashinfer_bench.onboarding.planning import build_stage_plan
 from flashinfer_bench.onboarding.runners.modal_client import run_modal_stage
+from flashinfer_bench.serve.inferencex_requests import request_manifest_digest
 from flashinfer_bench.tracing.flashinfer_logging import (
     infer_sglang_pass_settings,
     load_fi_definition_files,
@@ -148,7 +149,21 @@ def plan_for_stage(
     )
     if reviewed_definitions is not None:
         plan["definitions_sha256"] = definitions_digest(run_path / "definitions")
+    plan["run_id"] = run_path.as_posix()
     return plan
+
+
+def load_request_manifest(run_path: Path) -> dict[str, Any] | None:
+    path = run_path / "reports" / "evidence" / "request_manifest.json"
+    if not path.exists():
+        return None
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise SystemExit(f"ERROR: request manifest must be a JSON object: {path}")
+    expected = value.get("manifest_sha256")
+    if not isinstance(expected, str) or request_manifest_digest(value) != expected:
+        raise SystemExit(f"ERROR: request manifest digest is invalid: {path}")
+    return value
 
 
 def load_definition_artifacts(definitions_dir: Path) -> list[dict[str, Any]]:
@@ -209,11 +224,18 @@ def write_definition_review(run_path: Path, report: dict[str, Any]) -> None:
     )
 
 
-def sglang_inventory(run_path: Path) -> set[str] | None:
+def load_sglang_execution_inventory(run_path: Path) -> dict[str, Any] | None:
     path = run_path / "reports" / "evidence" / "sglang_execution_inventory.json"
     if not path.exists():
         return None
     value = json.loads(path.read_text(encoding="utf-8"))
+    return value if isinstance(value, dict) else None
+
+
+def sglang_inventory(run_path: Path) -> set[str] | None:
+    value = load_sglang_execution_inventory(run_path)
+    if value is None:
+        return None
     modules = value.get("modules") if isinstance(value, dict) else None
     if not isinstance(modules, list):
         return None

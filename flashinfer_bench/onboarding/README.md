@@ -41,10 +41,10 @@ Three evidence sources are combined:
 - FlashInfer native definition tracing writes `fi_api:` definitions.
 - A worker bootstrap records the exact SGLang module classes, forward signatures, sample
   input shapes, and bounded source snippets that actually executed.
-- SGLang's built-in tensor logger is enabled by default. In the same short model pass it
-  records first-layer outputs, which are compared with tracing inventory by output
-  type/shape/dtype. This is coverage evidence, not exact module identity. It does not
-  create workloads because it does not preserve complete operator inputs. Pass
+- SGLang's built-in generic dumper is enabled by default. In a bounded comparison pass it
+  records representative-layer module inputs and outputs. Complete module paths are compared
+  with tracing inventory first; tensor signatures are only a weak fallback. This remains
+  comparison evidence and does not create workloads. Pass
   `--no-compare-sglang-logger` to disable it.
 
 With `--agent codex`, the agent reads this evidence and writes Definition JSON directly.
@@ -85,8 +85,10 @@ validates every definition and records a SHA-256 digest. During the SGLang pass:
 
 - `fi_api:` definitions use FlashInfer's native Level-10 logger and the packaged
   `flashinfer_bench.tracing.sanitize` converter;
-- `sglang_module:` and `sglang_callable:` definitions capture real inputs in SGLang
-  workers and send them to the existing `TracingRuntime`;
+- `sglang_module:` definitions reuse SGLang generic-dumper inputs plus a thin
+  Definition/path/attribute binding adapter; `sglang_callable:` definitions keep the reviewed
+  callable wrapper because the dumper only hooks modules. Both paths send inputs to the existing
+  `TracingRuntime`;
 - worker-local shards are deduplicated by definition axes and merged into the same
   FlashInfer-Bench dataset layout.
 
@@ -174,9 +176,10 @@ fields are:
 ```
 
 SGLang logger comparison is enabled by default and needs no separate command. The
-definition pass passes debug logger settings to `sgl.Engine`, summarizes its temporary
-`Pass*.pt` output into `reports/evidence/sglang_logger.json`, compares output signatures,
-then deletes the raw dumps. Set `compare_sglang_logger` to `false` or pass
+definition pass enables SGLang's generic dumper through `DUMPER_*` environment variables,
+summarizes its temporary input/output dumps into `reports/evidence/sglang_logger.json`,
+compares complete module paths and tensor signatures, then deletes the raw dumps. Set
+`compare_sglang_logger` to `false` or pass
 `--no-compare-sglang-logger` to disable its additional logging overhead.
 
 Both stages replay the same deterministic synthetic request matrix. It combines 128-token and

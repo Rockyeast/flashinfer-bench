@@ -7,9 +7,9 @@ import json
 import os
 import shutil
 import tarfile
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from flashinfer_bench.onboarding.runners.sglang_runner import run_sglang_model
 from flashinfer_bench.onboarding.submission import publication_definition
@@ -20,21 +20,18 @@ from flashinfer_bench.tracing.flashinfer_logging import (
 )
 from flashinfer_bench.tracing.sanitize import sanitize_dumps
 from flashinfer_bench.tracing.sglang_logging import (
+    adapt_sglang_dumper_workloads,
+    build_sglang_dumper_workload_filter,
     compare_sglang_logger_inventory,
     load_sglang_definition_files,
     merge_sglang_workload_shards,
     sglang_capture_environment,
     summarize_module_inventory,
     summarize_sglang_capture_status,
-    summarize_sglang_tensor_logger,
+    summarize_sglang_dumper,
 )
 
 DEFAULT_REMOTE_OUTPUT_DIR = "/tmp/flashinfer-bench-onboarding"
-TENSOR_DUMP_LAYOUTS = {
-    "gemma-4": ("language_model", "layers"),
-}
-
-
 def run_remote_stage(
     plan: dict[str, Any], remote_output_dir: str = DEFAULT_REMOTE_OUTPUT_DIR
 ) -> dict[str, Any]:
@@ -70,28 +67,33 @@ def _dump_definitions(plan: dict[str, Any], output_dir: Path) -> dict[str, Any]:
     with (
         flashinfer_definition_dump(definitions_dir),
         sglang_capture_environment(capture_root, mode="inventory"),
-        _tensor_dump_layout(plan) if compare_tensor_logger else _tensor_dump_layout({}),
     ):
-        run_sglang_model(execution_plan)
+        request_manifest = run_sglang_model(execution_plan)
+        logger_request_manifest = None
         if compare_tensor_logger:
             logger_plan = _logger_comparison_plan(
                 execution_plan,
                 output_dir=logger_root,
                 logger_layers=logger_layers,
             )
-            run_sglang_model(logger_plan)
+            logger_request_manifest = run_sglang_model(logger_plan)
 
     files = sorted(definitions_dir.rglob("*.json"))
     module_inventory = summarize_module_inventory(capture_root)
-    sglang_logger = summarize_sglang_tensor_logger(logger_root)
+    module_inventory["request_provenance"] = _request_provenance(request_manifest)
+    sglang_logger = summarize_sglang_dumper(logger_root)
     sglang_logger["enabled"] = compare_tensor_logger
     sglang_logger["layers"] = logger_layers
     sglang_logger["comparison"] = compare_sglang_logger_inventory(
         sglang_logger, module_inventory
     )
+    if logger_request_manifest is not None:
+        sglang_logger["request_provenance"] = _request_provenance(
+            logger_request_manifest
+        )
     if not compare_tensor_logger:
         sglang_logger["note"] = (
-            "SGLang's output-only tensor logger was disabled for this run. "
+            "SGLang's input/output dumper was disabled for this run. "
             "Remove --no-compare-sglang-logger or set compare_sglang_logger=true "
             "to enable it."
         )
@@ -100,6 +102,7 @@ def _dump_definitions(plan: dict[str, Any], output_dir: Path) -> dict[str, Any]:
     return {
         "stage": "definitions",
         "definitions_archive_b64": _archive_dir_b64(definitions_dir, arcname="definitions"),
+        "request_manifest": request_manifest,
         "module_inventory": module_inventory,
         "sglang_logger": sglang_logger,
         "summary": {
@@ -107,9 +110,9 @@ def _dump_definitions(plan: dict[str, Any], output_dir: Path) -> dict[str, Any]:
             "model_passes": 2 if compare_tensor_logger else 1,
             "sglang_modules": module_inventory["summary"]["modules"],
             "sglang_logger_operators": sglang_logger["summary"]["operators"],
-            "sglang_logger_exact_identity_matches": sglang_logger["comparison"][
-                "summary"
-            ]["exact_identity_matched_logger_operators"],
+            "sglang_logger_path_matches": sglang_logger["comparison"]["summary"][
+                "path_matched_logger_operators"
+            ],
             "sglang_logger_signature_fallback_matches": sglang_logger["comparison"][
                 "summary"
             ]["signature_fallback_matched_logger_operators"],
@@ -120,7 +123,7 @@ def _dump_definitions(plan: dict[str, Any], output_dir: Path) -> dict[str, Any]:
 def _logger_comparison_plan(
     plan: dict[str, Any], *, output_dir: Path, logger_layers: list[int]
 ) -> dict[str, Any]:
-    """Keep SGLang's output-only logger bounded to one short representative request."""
+    """Keep SGLang's input/output dumper bounded to one short representative request."""
     scenarios = plan.get("request_scenarios")
     if not isinstance(scenarios, list) or not scenarios:
         raise ValueError("definition stage requires request_scenarios")
@@ -141,8 +144,8 @@ def _logger_comparison_plan(
     logger_plan["sampling"] = {"max_new_tokens": 1}
     logger_plan["supplemental_runs"] = []
     sglang_config = dict(plan.get("sglang") or {})
-    sglang_config["debug_tensor_dump_output_folder"] = str(output_dir)
-    sglang_config["debug_tensor_dump_layers"] = logger_layers
+    sglang_config["dumper_output_dir"] = str(output_dir)
+    sglang_config["dumper_layers"] = logger_layers
     logger_plan["sglang"] = sglang_config
     return logger_plan
 
@@ -211,32 +214,6 @@ def _find_layer_types(value: dict[str, Any]) -> list[Any] | None:
     return None
 
 
-@contextmanager
-def _tensor_dump_layout(plan: dict[str, Any]) -> Iterator[None]:
-    model_name = str(plan.get("model_name") or "").lower()
-    layout = next(
-        (value for marker, value in TENSOR_DUMP_LAYOUTS.items() if marker in model_name),
-        None,
-    )
-    if layout is None:
-        yield
-        return
-    updates = {
-        "TENSOR_DUMP_TOP_LEVEL_MODULE_NAME": layout[0],
-        "TENSOR_DUMP_LAYERS_MODULE_NAME": layout[1],
-    }
-    previous = {name: os.environ.get(name) for name in updates}
-    os.environ.update(updates)
-    try:
-        yield
-    finally:
-        for name, value in previous.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
-
-
 def _dump_workloads(plan: dict[str, Any], output_dir: Path) -> dict[str, Any]:
     definitions_dir = output_dir / "definitions"
     _write_reviewed_definitions(definitions_dir, plan.get("reviewed_definitions"))
@@ -249,6 +226,7 @@ def _dump_workloads(plan: dict[str, Any], output_dir: Path) -> dict[str, Any]:
 
     dump_dir = output_dir / "native_dumps"
     capture_root = output_dir / "sglang_capture"
+    dumper_root = output_dir / "sglang_dumper"
     dataset_dir = output_dir / "output"
     capture_metadata = []
     for source in definition_files:
@@ -264,6 +242,24 @@ def _dump_workloads(plan: dict[str, Any], output_dir: Path) -> dict[str, Any]:
         capture_metadata.append(metadata)
 
     include_pattern = ""
+    execution_plan = dict(plan)
+    dumper_filter = ""
+    dumper_selection: dict[str, Any] = {
+        "selected_modules": {},
+        "missing_modules": [],
+    }
+    if sglang_definition_files:
+        inventory = plan.get("sglang_execution_inventory")
+        if not isinstance(inventory, dict):
+            inventory = {}
+        dumper_filter, dumper_selection = build_sglang_dumper_workload_filter(
+            sglang_definition_files, inventory
+        )
+        if dumper_filter:
+            sglang_config = dict(execution_plan.get("sglang") or {})
+            sglang_config["dumper_output_dir"] = str(dumper_root)
+            sglang_config["dumper_filter"] = dumper_filter
+            execution_plan["sglang"] = sglang_config
     with ExitStack() as stack:
         if fi_definition_files:
             include_pattern = stack.enter_context(
@@ -275,7 +271,7 @@ def _dump_workloads(plan: dict[str, Any], output_dir: Path) -> dict[str, Any]:
                     capture_root, mode="workloads", definitions_dir=definitions_dir
                 )
             )
-        run_sglang_model(plan)
+        request_manifest = run_sglang_model(execution_plan)
 
     max_new_workloads = int(plan.get("max_new_workloads") or 20)
     results: dict[str, list[dict[str, Any]]] = {}
@@ -289,11 +285,36 @@ def _dump_workloads(plan: dict[str, Any], output_dir: Path) -> dict[str, Any]:
         )
     sglang_counts: dict[str, int] = {}
     sglang_diagnostics: dict[str, Any] = {
-        "summary": {"processes": 0, "capture_calls": 0, "errors": 0},
+        "summary": {
+            "processes": 0,
+            "capture_calls": 0,
+            "module_bindings": 0,
+            "errors": 0,
+        },
         "captures": {},
+        "bindings": {},
+        "errors": [],
+    }
+    sglang_dumper: dict[str, Any] = {
+        "summary": {
+            "dump_files": 0,
+            "module_calls": 0,
+            "collect_attempts": 0,
+            "collect_accepted": 0,
+            "collect_rejected": 0,
+        },
+        "collect_results": {},
+        "selection": dumper_selection,
         "errors": [],
     }
     if sglang_definition_files:
+        if dumper_filter:
+            sglang_dumper = adapt_sglang_dumper_workloads(
+                dumper_root,
+                capture_root=capture_root,
+                definition_files=sglang_definition_files,
+            )
+            sglang_dumper["selection"] = dumper_selection
         sglang_diagnostics = summarize_sglang_capture_status(capture_root)
         sglang_counts = merge_sglang_workload_shards(
             capture_root,
@@ -303,6 +324,7 @@ def _dump_workloads(plan: dict[str, Any], output_dir: Path) -> dict[str, Any]:
         )
     shutil.rmtree(dump_dir, ignore_errors=True)
     shutil.rmtree(capture_root, ignore_errors=True)
+    shutil.rmtree(dumper_root, ignore_errors=True)
 
     fi_names = {path.stem for path in fi_definition_files}
     sglang_names = {path.stem for path in sglang_definition_files}
@@ -320,6 +342,22 @@ def _dump_workloads(plan: dict[str, Any], output_dir: Path) -> dict[str, Any]:
         for path in definition_files
     ]
     missing = [item for item in collected if item["workloads"] == 0]
+    dumper_collect_results = sglang_dumper.get("collect_results", {})
+    if isinstance(dumper_collect_results, dict):
+        for item in missing:
+            result = dumper_collect_results.get(item["name"])
+            if not isinstance(result, dict):
+                if item["backend"] == "sglang":
+                    item["reason"] = "no SGLang dumper call matched this definition"
+                continue
+            item["collect_result"] = result
+            reasons = result.get("reasons")
+            if isinstance(reasons, dict) and reasons:
+                item["reason"] = max(reasons, key=lambda reason: int(reasons[reason]))
+            elif int(result.get("accepted") or 0) > 0:
+                item["reason"] = "runtime accepted captures but emitted no workload"
+            elif int(result.get("attempts") or 0) == 0:
+                item["reason"] = "no SGLang dumper call matched this definition"
     report = {
         "summary": {
             "definitions": len(definition_files),
@@ -334,7 +372,9 @@ def _dump_workloads(plan: dict[str, Any], output_dir: Path) -> dict[str, Any]:
         "missing": missing,
         "skipped": skipped,
         "sglang_capture": sglang_diagnostics,
+        "sglang_dumper": sglang_dumper,
         "request_profiles": _request_profile_summary(plan),
+        "request_provenance": _request_provenance(request_manifest),
     }
     return {
         "stage": "workloads",
@@ -342,7 +382,18 @@ def _dump_workloads(plan: dict[str, Any], output_dir: Path) -> dict[str, Any]:
         "output_archive_b64": _archive_dir_b64(dataset_dir, arcname="output"),
         "workload_report": report,
         "capture_metadata": capture_metadata,
+        "request_provenance": _request_provenance(request_manifest),
         "summary": report["summary"],
+    }
+
+
+def _request_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "run_id": manifest.get("run_id"),
+        "model_name": manifest.get("model_name"),
+        "generator": manifest.get("generator"),
+        "manifest_sha256": manifest.get("manifest_sha256"),
+        "summary": manifest.get("summary"),
     }
 
 

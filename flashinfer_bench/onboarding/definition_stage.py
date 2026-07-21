@@ -90,6 +90,10 @@ def run_dump_definition(args: argparse.Namespace) -> int:
     sglang_logger = result.get("sglang_logger")
     if isinstance(sglang_logger, dict):
         write_json(evidence_dir / "sglang_logger.json", sglang_logger)
+    request_manifest = result.get("request_manifest")
+    if not isinstance(request_manifest, dict):
+        raise SystemExit("ERROR: remote definition stage returned no request manifest")
+    write_json(evidence_dir / "request_manifest.json", request_manifest)
     organize_definition_directory(definitions_dir)
     inventory = sglang_inventory(run_path)
     report = check_definition_directory(

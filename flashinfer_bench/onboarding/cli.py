@@ -43,7 +43,7 @@ def add_cli_subcommands(subparsers: Any) -> None:
         "--compare-sglang-logger",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Enable or disable SGLang output-signature comparison (enabled by default).",
+        help="Enable or disable SGLang module input/output comparison (enabled by default).",
     )
     definitions.add_argument(
         "--sglang-logger-layer",
@@ -51,7 +51,7 @@ def add_cli_subcommands(subparsers: Any) -> None:
         action="append",
         type=int,
         help=(
-            "Decoder layer to include in the SGLang tensor logger; repeat for multiple "
+            "Decoder layer to include in the SGLang dumper; repeat for multiple "
             "representative layers. By default, one layer per HF layer_types value is used."
         ),
     )

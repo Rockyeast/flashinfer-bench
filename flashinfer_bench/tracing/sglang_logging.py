@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -49,10 +50,12 @@ class _ProcessState:
     specs_by_callable: dict[str, list[SGLangCaptureSpec]] = field(default_factory=dict)
     runtime: TracingRuntime | None = None
     inventory_seen: set[tuple[str, str]] = field(default_factory=set)
+    module_binding_seen: set[tuple[int, str, str]] = field(default_factory=set)
     module_parents: dict[int, list[tuple[torch.nn.Module, str]]] = field(
         default_factory=dict
     )
     captures: dict[str, int] = field(default_factory=dict)
+    bindings: dict[str, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     callable_patches: list[tuple[Any, str, Any]] = field(default_factory=list)
     calls_since_flush: int = 0
@@ -82,6 +85,197 @@ def load_sglang_definition_files(definitions_dir: Path) -> tuple[list[Path], lis
         else:
             skipped.append({"path": str(path), "reason": "missing_sglang_capture_tag"})
     return files, skipped
+
+
+def build_sglang_dumper_workload_filter(
+    definition_files: list[Path], module_inventory: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    """Build an exact SGLang dumper filter for reviewed module definitions."""
+    module_classes: set[str] = set()
+    for path in definition_files:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        module_classes.update(_capture_spec(value).modules)
+    if not module_classes:
+        return "", {"selected_modules": {}, "missing_modules": []}
+
+    inventory_modules = module_inventory.get("modules")
+    if not isinstance(inventory_modules, list):
+        raise ValueError("SGLang execution inventory has no modules list")
+    paths_by_class: dict[str, list[str]] = {}
+    for item in inventory_modules:
+        if not isinstance(item, dict) or not isinstance(item.get("class_path"), str):
+            continue
+        module_paths = item.get("module_paths")
+        if not isinstance(module_paths, list):
+            continue
+        paths_by_class[str(item["class_path"])] = sorted(
+            {path for path in module_paths if isinstance(path, str) and path}
+        )
+
+    selected: dict[str, str] = {}
+    missing: list[str] = []
+    for class_path in sorted(module_classes):
+        paths = paths_by_class.get(class_path, [])
+        if not paths:
+            missing.append(class_path)
+            continue
+        # SGLang's dumper walks ``named_modules()`` with duplicate removal, so a
+        # shared module is registered under its first numeric layer path.  A
+        # lexical sort would incorrectly place ``layers.14`` before ``layers.4``.
+        selected[class_path] = min(paths, key=_module_path_order)
+    if missing:
+        raise ValueError(
+            "reviewed SGLang modules are absent from execution inventory: "
+            + ", ".join(missing)
+        )
+    if not selected:
+        return "", {"selected_modules": {}, "missing_modules": []}
+
+    alternatives = "|".join(re.escape(path) for path in selected.values())
+    pattern = (
+        rf"^non_intrusive__(?:{alternatives})\."
+        r"(?:inputs(?:\.|$)|output(?:\.|$))"
+    )
+    return (
+        f"search({pattern!r}, name) is not None",
+        {"selected_modules": selected, "missing_modules": []},
+    )
+
+
+def adapt_sglang_dumper_workloads(
+    dump_root: Path,
+    *,
+    capture_root: Path,
+    definition_files: list[Path],
+) -> dict[str, Any]:
+    """Map SGLang module input dumps to Definitions and reuse TracingRuntime.collect."""
+    definitions: dict[str, tuple[Path, SGLangCaptureSpec, list[str]]] = {}
+    for path in definition_files:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        spec = _capture_spec(value)
+        if spec.modules:
+            inputs = value.get("inputs")
+            definitions[spec.name] = (
+                path,
+                spec,
+                list(inputs) if isinstance(inputs, dict) else [],
+            )
+    if not definitions:
+        return {
+            "summary": {
+                "dump_files": 0,
+                "module_calls": 0,
+                "collect_attempts": 0,
+                "collect_accepted": 0,
+                "collect_rejected": 0,
+            },
+            "collect_results": {},
+            "errors": [],
+        }
+
+    bindings = _load_module_bindings(capture_root)
+    shard = capture_root / "shards" / "sglang_dumper"
+    runtime = _create_shard_runtime(
+        shard,
+        definitions_dir=None,
+        specs=[spec for _, spec, _ in definitions.values()],
+        definition_files=[path for path, _, _ in definitions.values()],
+    )
+
+    records: list[tuple[tuple[str, int, int, int, str], str, str, str, Any]] = []
+    errors: list[str] = []
+    files = sorted(dump_root.rglob("*.pt")) if dump_root.exists() else []
+    for path in files:
+        try:
+            item = _load_torch_payload(path)
+        except Exception as exc:  # noqa: BLE001 - bad evidence must not hide all captures
+            errors.append(f"{path}: {type(exc).__name__}: {exc}")
+            continue
+        if not isinstance(item, dict) or not isinstance(item.get("meta"), dict):
+            continue
+        meta = item["meta"]
+        parsed = _parse_sglang_dumper_name(meta.get("name"))
+        if parsed is None:
+            continue
+        module_path, value_kind, value_name = parsed
+        relative = path.relative_to(dump_root)
+        experiment = relative.parts[0] if len(relative.parts) > 1 else ""
+        rank = meta.get("rank", meta.get("world_rank"))
+        step = meta.get("step")
+        dump_index = meta.get("dump_index")
+        order = (
+            experiment,
+            int(rank) if type(rank) is int else -1,
+            int(step) if type(step) is int else -1,
+            int(dump_index) if type(dump_index) is int else -1,
+            str(path),
+        )
+        records.append((order, module_path, value_kind, value_name, item.get("value")))
+
+    pending: dict[tuple[str, int, str], dict[str, Any]] = {}
+    module_calls = 0
+    collect_attempts = 0
+    collect_accepted = 0
+    collect_rejected = 0
+    collect_results: dict[str, dict[str, Any]] = {}
+    missing_bindings: set[str] = set()
+    for order, module_path, value_kind, value_name, value in sorted(records):
+        key = (order[0], order[1], module_path)
+        if value_kind == "input":
+            pending.setdefault(key, {})[value_name] = value
+            continue
+        call_inputs = pending.pop(key, {})
+        if not call_inputs:
+            continue
+        module_calls += 1
+        module_bindings = bindings.get(module_path, [])
+        if not module_bindings:
+            missing_bindings.add(module_path)
+            continue
+        for binding in module_bindings:
+            definition_name = binding.get("definition")
+            definition_entry = definitions.get(str(definition_name))
+            if definition_entry is None:
+                continue
+            _, spec, input_names = definition_entry
+            try:
+                values = _definition_values_from_dumper(
+                    spec, binding, call_inputs, input_names=input_names
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                if len(errors) < 50:
+                    errors.append(f"{spec.name}@{module_path}: {exc}")
+                continue
+            result = runtime.collect(spec.name, args=(), kwargs=values)
+            collect_attempts += 1
+            definition_result = collect_results.setdefault(
+                spec.name, {"attempts": 0, "accepted": 0, "rejected": 0, "reasons": {}}
+            )
+            definition_result["attempts"] += 1
+            if result.accepted:
+                collect_accepted += 1
+                definition_result["accepted"] += 1
+            else:
+                collect_rejected += 1
+                definition_result["rejected"] += 1
+                reason = result.reason or "unknown"
+                reasons = definition_result["reasons"]
+                reasons[reason] = reasons.get(reason, 0) + 1
+    runtime.flush()
+    return {
+        "summary": {
+            "dump_files": len(files),
+            "module_calls": module_calls,
+            "collect_attempts": collect_attempts,
+            "collect_accepted": collect_accepted,
+            "collect_rejected": collect_rejected,
+            "missing_bindings": len(missing_bindings),
+            "errors": len(errors),
+        },
+        "collect_results": collect_results,
+        "missing_binding_paths": sorted(missing_bindings),
+        "errors": errors[:50],
+    }
 
 
 @contextmanager
@@ -238,59 +432,82 @@ def summarize_module_inventory(capture_root: Path) -> dict[str, Any]:
     }
 
 
-def summarize_sglang_tensor_logger(dump_root: Path) -> dict[str, Any]:
-    """Summarize SGLang's output-only tensor logger without retaining tensor dumps."""
+def summarize_sglang_dumper(dump_root: Path) -> dict[str, Any]:
+    """Summarize SGLang's generic module input/output dumps."""
     operators: dict[str, dict[str, Any]] = {}
     files = sorted(dump_root.rglob("*.pt")) if dump_root.exists() else []
     total_bytes = sum(path.stat().st_size for path in files)
     for path in files:
         try:
-            values = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+            item = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
         except TypeError:
-            values = torch.load(path, map_location="cpu", weights_only=True)
-        if not isinstance(values, dict):
+            item = torch.load(path, map_location="cpu", weights_only=True)
+        if not isinstance(item, dict) or not isinstance(item.get("meta"), dict):
             continue
-        process = _logger_process_metadata(path)
-        for name, value in values.items():
-            if not isinstance(name, str):
-                continue
-            operator = operators.setdefault(
-                name,
-                {
-                    "module_path": name,
-                    "layer_index": _layer_index_from_path(name),
-                    **_describe_value(value),
-                    "observed_processes": [],
-                    "observed_ranks": [],
-                },
-            )
-            if process["pid"] is not None:
-                operator["observed_processes"] = sorted(
-                    {*operator["observed_processes"], process["pid"]}
-                )
-            if process["rank"] is not None:
-                operator["observed_ranks"] = sorted(
-                    {*operator["observed_ranks"], process["rank"]}
-                )
+        meta = item["meta"]
+        parsed = _parse_sglang_dumper_name(meta.get("name"))
+        if parsed is None:
+            continue
+        module_path, value_kind, value_name = parsed
+        operator = operators.setdefault(
+            module_path,
+            {
+                "module_path": module_path,
+                "layer_index": (
+                    meta.get("layer_id")
+                    if type(meta.get("layer_id")) is int
+                    else _layer_index_from_path(module_path)
+                ),
+                "inputs": {},
+                "output": None,
+                "observed_ranks": [],
+            },
+        )
+        rank = meta.get("rank", meta.get("world_rank"))
+        if type(rank) is int:
+            operator["observed_ranks"] = sorted({*operator["observed_ranks"], rank})
+        description = _describe_value(item.get("value"))
+        if value_kind == "input":
+            operator["inputs"][value_name] = description
+        else:
+            operator["output"] = description
+    input_count = sum(len(operator["inputs"]) for operator in operators.values())
+    output_count = sum(operator["output"] is not None for operator in operators.values())
     return {
         "summary": {
             "files": len(files),
             "bytes": total_bytes,
             "operators": len(operators),
+            "inputs": input_count,
+            "outputs": output_count,
             "used_for_workloads": False,
         },
         "operators": [{"name": name, **operators[name]} for name in sorted(operators)],
         "note": (
-            "SGLang's logger records module outputs. It is comparison evidence only; "
+            "SGLang's generic dumper records module inputs and outputs. It is comparison "
+            "evidence only; "
             "definition-driven input capture uses the shared TracingRuntime."
         ),
     }
 
 
+def _parse_sglang_dumper_name(value: Any) -> tuple[str, str, str] | None:
+    if not isinstance(value, str) or not value.startswith("non_intrusive__"):
+        return None
+    value = value.removeprefix("non_intrusive__")
+    match = re.fullmatch(r"(.+)\.(inputs|output)(?:\.(.+))?", value)
+    if match is None:
+        return None
+    module_path, kind, value_name = match.groups()
+    if kind == "inputs" and not value_name:
+        return None
+    return module_path, "input" if kind == "inputs" else "output", value_name or "output"
+
+
 def compare_sglang_logger_inventory(
     logger_report: dict[str, Any], module_inventory: dict[str, Any]
 ) -> dict[str, Any]:
-    """Compare logger outputs with tracing inventory by identity, then signature."""
+    """Compare dumper inputs/outputs with tracing inventory by path, then signature."""
     logger_operators = logger_report.get("operators")
     inventory_modules = module_inventory.get("modules")
     if not isinstance(logger_operators, list):
@@ -298,7 +515,6 @@ def compare_sglang_logger_inventory(
     if not isinstance(inventory_modules, list):
         inventory_modules = []
 
-    modules_by_identity: dict[tuple[int, str], set[str]] = {}
     modules_by_path: dict[str, set[str]] = {}
     modules_by_signature: dict[str, set[str]] = {}
     inventory_names: set[str] = set()
@@ -319,46 +535,29 @@ def compare_sglang_logger_inventory(
             if not isinstance(module_path, str) or not module_path:
                 continue
             modules_by_path.setdefault(module_path, set()).add(class_path)
-        observations = module.get("module_observations")
-        if not isinstance(observations, list):
-            observations = []
-        for observation in observations:
-            if not isinstance(observation, dict):
-                continue
-            pid = observation.get("pid")
-            module_path = observation.get("module_path")
-            if type(pid) is int and pid > 0 and isinstance(module_path, str):
-                modules_by_identity.setdefault((pid, module_path), set()).add(class_path)
-
     matches: list[dict[str, Any]] = []
     logger_only: list[str] = []
     matched_inventory: set[str] = set()
     ambiguous = 0
-    exact_matches = 0
     path_matches = 0
     signature_fallback_matches = 0
+    input_signature_matches = 0
+    output_signature_matches = 0
     for operator in logger_operators:
         if not isinstance(operator, dict) or not isinstance(operator.get("name"), str):
             continue
         name = str(operator["name"])
-        processes = operator.get("observed_processes")
-        if not isinstance(processes, list):
-            processes = []
-        identity_candidates: set[str] = set()
-        for pid in processes:
-            if type(pid) is int:
-                identity_candidates.update(modules_by_identity.get((pid, name), set()))
-        if identity_candidates:
-            candidates = sorted(identity_candidates)
-            match_kind = "process_and_module_path"
-            exact_matches += 1
-        elif name in modules_by_path:
+        if name in modules_by_path:
             candidates = sorted(modules_by_path[name])
             match_kind = "module_path"
             path_matches += 1
         else:
+            logger_output = operator.get("output")
             candidates = sorted(
-                modules_by_signature.get(_output_signature(operator), set())
+                modules_by_signature.get(
+                    _output_signature(logger_output) if isinstance(logger_output, dict) else "",
+                    set(),
+                )
             )
             match_kind = "output_signature"
             if candidates:
@@ -367,6 +566,28 @@ def compare_sglang_logger_inventory(
             logger_only.append(name)
             continue
         matched_inventory.update(candidates)
+        input_match = False
+        output_match = False
+        if len(candidates) == 1:
+            inventory = next(
+                (
+                    module
+                    for module in inventory_modules
+                    if isinstance(module, dict) and module.get("class_path") == candidates[0]
+                ),
+                None,
+            )
+            if isinstance(inventory, dict):
+                input_match = _value_map_signature(operator.get("inputs")) == _value_map_signature(
+                    inventory.get("sample_inputs")
+                )
+                logger_output = operator.get("output")
+                inventory_output = inventory.get("sample_output")
+                output_match = isinstance(logger_output, dict) and isinstance(
+                    inventory_output, dict
+                ) and _output_signature(logger_output) == _output_signature(inventory_output)
+        input_signature_matches += int(input_match)
+        output_signature_matches += int(output_match)
         is_ambiguous = len(candidates) > 1
         ambiguous += int(is_ambiguous)
         matches.append(
@@ -375,20 +596,23 @@ def compare_sglang_logger_inventory(
                 "layer_index": operator.get("layer_index"),
                 "candidate_tracing_modules": candidates,
                 "match_kind": match_kind,
+                "input_signature_match": input_match,
+                "output_signature_match": output_match,
                 "ambiguous": is_ambiguous,
             }
         )
 
     tracing_only = sorted(inventory_names - matched_inventory)
     return {
-        "basis": "process_and_module_path_then_output_type_shape_dtype",
+        "basis": "complete_module_path_then_output_type_shape_dtype",
         "summary": {
             "logger_operators": len(logger_operators),
             "tracing_modules_with_outputs": len(inventory_names),
             "matched_logger_operators": len(matches),
-            "exact_identity_matched_logger_operators": exact_matches,
             "path_matched_logger_operators": path_matches,
             "signature_fallback_matched_logger_operators": signature_fallback_matches,
+            "input_signature_matched_logger_operators": input_signature_matches,
+            "output_signature_matched_logger_operators": output_signature_matches,
             "logger_only_operators": len(logger_only),
             "tracing_only_modules": len(tracing_only),
             "ambiguous_logger_operators": ambiguous,
@@ -397,31 +621,43 @@ def compare_sglang_logger_inventory(
         "logger_only": logger_only,
         "tracing_only": tracing_only,
         "note": (
-            "Exact matches share a process id and complete module instance path. "
-            "Path-only matches share the module path across different observed processes. "
+            "Primary matches share the complete module instance path. "
             "Output-signature fallback matches are coverage evidence only, not module "
             "identity proof."
         ),
     }
 
 
+def _value_map_signature(value: Any) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+    return sorted(
+        _output_signature(item) for item in value.values() if isinstance(item, dict)
+    )
+
+
 def summarize_sglang_capture_status(capture_root: Path) -> dict[str, Any]:
     """Combine process-local capture counters and bounded error samples."""
     captures: dict[str, int] = {}
+    bindings: dict[str, int] = {}
     errors: list[str] = []
     files = sorted((capture_root / "status").glob("*.json"))
     for path in files:
         item = json.loads(path.read_text(encoding="utf-8"))
         for name, count in item.get("captures", {}).items():
             captures[str(name)] = captures.get(str(name), 0) + int(count)
+        for name, count in item.get("bindings", {}).items():
+            bindings[str(name)] = bindings.get(str(name), 0) + int(count)
         errors.extend(str(error) for error in item.get("errors", []))
     return {
         "summary": {
             "processes": len(files),
             "capture_calls": sum(captures.values()),
+            "module_bindings": sum(bindings.values()),
             "errors": len(errors),
         },
         "captures": captures,
+        "bindings": bindings,
         "errors": errors[:50],
     }
 
@@ -597,14 +833,40 @@ def _prepare_workload_state(state: _ProcessState) -> _ProcessState:
             for callable_path in spec.callables:
                 state.specs_by_callable.setdefault(callable_path, []).append(spec)
 
-    shard = state.root / "shards" / str(state.pid)
+    callable_specs = [spec for spec in specs if spec.callables]
+    if callable_specs:
+        state.runtime = _create_shard_runtime(
+            state.root / "shards" / str(state.pid),
+            definitions_dir=state.definitions_dir,
+            specs=callable_specs,
+        )
+    return state
+
+
+def _create_shard_runtime(
+    shard: Path,
+    *,
+    definitions_dir: Path | None,
+    specs: list[SGLangCaptureSpec],
+    definition_files: list[Path] | None = None,
+) -> TracingRuntime:
     definitions_output = shard / "definitions"
-    for source in sorted(state.definitions_dir.rglob("*.json")):
+    names = {spec.name for spec in specs}
+    sources = (
+        sorted(definition_files)
+        if definition_files is not None
+        else sorted(definitions_dir.rglob("*.json")) if definitions_dir is not None else []
+    )
+    for source in sources:
         value = json.loads(source.read_text(encoding="utf-8"))
         name = value.get("name") if isinstance(value, dict) else None
-        if not isinstance(name, str) or not any(spec.name == name for spec in specs):
+        if not isinstance(name, str) or name not in names:
             continue
-        destination = definitions_output / source.relative_to(state.definitions_dir)
+        if definitions_dir is not None:
+            relative = source.relative_to(definitions_dir)
+        else:
+            relative = Path(str(value["op_type"])) / source.name
+        destination = definitions_output / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
 
@@ -615,8 +877,7 @@ def _prepare_workload_state(state: _ProcessState) -> _ProcessState:
         filter_policy_kwargs={"k": 1},
     )
     registry = TracingConfigRegistry(per_definition={spec.name: config for spec in specs})
-    state.runtime = TracingRuntime(trace_set, registry)
-    return state
+    return TracingRuntime(trace_set, registry)
 
 
 def _capture_spec(definition: dict[str, Any]) -> SGLangCaptureSpec:
@@ -708,9 +969,7 @@ def _handle_module_call(
             return
         specs = state.specs_by_module.get(class_path, [])
         for spec in specs:
-            _collect_call(state, spec, module.forward, args, kwargs, module=module)
-        if specs and state.runtime is not None:
-            _flush_incrementally(state)
+            _record_module_binding(state, spec, module)
     finally:
         _IN_HOOK.active = False
 
@@ -776,6 +1035,139 @@ def _collect_call(
     except Exception as exc:  # noqa: BLE001 - capture must never break model inference
         if len(state.errors) < 20:
             state.errors.append(f"{spec.name}: {type(exc).__name__}: {exc}")
+
+
+def _record_module_binding(
+    state: _ProcessState, spec: SGLangCaptureSpec, module: torch.nn.Module
+) -> None:
+    """Persist only Definition/path/attribute metadata that SGLang's dumper lacks."""
+    module_paths = _module_instance_paths(state, module)
+    if not module_paths:
+        if len(state.errors) < 20:
+            state.errors.append(f"{spec.name}: module instance path is unavailable")
+        return
+    try:
+        signature = inspect.signature(module.forward)
+    except (TypeError, ValueError):
+        signature = None
+    argument_positions: dict[str, int] = {}
+    if signature is not None:
+        position = 0
+        for parameter in signature.parameters.values():
+            if parameter.kind in {
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            }:
+                argument_positions[parameter.name] = position
+                position += 1
+
+    attributes: dict[str, Any] = {}
+    try:
+        for input_name, (kind, source_name) in spec.input_sources.items():
+            if kind == "attr":
+                attributes[input_name] = _portable_binding_value(
+                    _nested_attribute(module, source_name)
+                )
+    except Exception as exc:  # noqa: BLE001 - capture metadata cannot break inference
+        if len(state.errors) < 20:
+            state.errors.append(f"{spec.name}: {type(exc).__name__}: {exc}")
+        return
+
+    for module_path in module_paths:
+        identity = (id(module), module_path, spec.name)
+        if identity in state.module_binding_seen:
+            continue
+        state.module_binding_seen.add(identity)
+        destination = (
+            state.root
+            / "module_bindings"
+            / str(state.pid)
+            / f"{len(state.module_binding_seen):05d}.pt"
+        )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "definition": spec.name,
+                "class_path": f"{type(module).__module__}.{type(module).__qualname__}",
+                "module_path": module_path,
+                "argument_positions": argument_positions,
+                "attributes": attributes,
+            },
+            destination,
+        )
+        state.bindings[spec.name] = state.bindings.get(spec.name, 0) + 1
+
+
+def _portable_binding_value(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().clone()
+    if isinstance(value, tuple):
+        return tuple(_portable_binding_value(item) for item in value)
+    if isinstance(value, list):
+        return [_portable_binding_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _portable_binding_value(item) for key, item in value.items()}
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    raise TypeError(f"unsupported module attribute type: {type(value).__name__}")
+
+
+def _load_module_bindings(capture_root: Path) -> dict[str, list[dict[str, Any]]]:
+    result: dict[str, list[dict[str, Any]]] = {}
+    for path in sorted((capture_root / "module_bindings").rglob("*.pt")):
+        value = _load_torch_payload(path)
+        if not isinstance(value, dict) or not isinstance(value.get("module_path"), str):
+            continue
+        result.setdefault(str(value["module_path"]), []).append(value)
+    return result
+
+
+def _definition_values_from_dumper(
+    spec: SGLangCaptureSpec,
+    binding: dict[str, Any],
+    call_inputs: dict[str, Any],
+    *,
+    input_names: list[str],
+) -> dict[str, Any]:
+    argument_positions = binding.get("argument_positions")
+    attributes = binding.get("attributes")
+    if not isinstance(argument_positions, dict) or not isinstance(attributes, dict):
+        raise TypeError("invalid module binding sidecar")
+    values: dict[str, Any] = {}
+    for input_name in input_names:
+        source = spec.input_sources.get(input_name, ("arg", input_name))
+        kind, source_name = source
+        if kind == "attr":
+            if input_name not in attributes:
+                raise KeyError(f"attribute input {input_name!r} is missing")
+            values[input_name] = attributes[input_name]
+            continue
+        dumper_name = source_name
+        if not source_name.isdecimal() and source_name in argument_positions:
+            dumper_name = str(argument_positions[source_name])
+        values[input_name] = _dumper_argument(call_inputs, dumper_name)
+    return values
+
+
+def _dumper_argument(call_inputs: dict[str, Any], name: str) -> Any:
+    if name in call_inputs:
+        return call_inputs[name]
+    prefix = f"{name}."
+    indexed = [
+        (int(key.removeprefix(prefix)), value)
+        for key, value in call_inputs.items()
+        if key.startswith(prefix) and key.removeprefix(prefix).isdigit()
+    ]
+    if indexed:
+        return tuple(value for _, value in sorted(indexed))
+    raise KeyError(f"SGLang dumper input {name!r} is missing")
+
+
+def _load_torch_payload(path: Path) -> Any:
+    try:
+        return torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+    except TypeError:
+        return torch.load(path, map_location="cpu", weights_only=True)
 
 
 def _record_inventory(
@@ -874,6 +1266,11 @@ def _layer_index_from_path(path: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _module_path_order(path: str) -> tuple[int, str]:
+    layer_index = _layer_index_from_path(path)
+    return (layer_index if layer_index is not None else sys.maxsize, path)
+
+
 def _logger_process_metadata(path: Path) -> dict[str, int | None]:
     match = re.search(r"Rank(?P<rank>\d+)_pid(?P<pid>\d+)", str(path.parent))
     if match is None:
@@ -962,7 +1359,12 @@ def _write_state_summary(state: _ProcessState) -> None:
     temporary = path.with_suffix(".tmp")
     temporary.write_text(
         json.dumps(
-            {"pid": state.pid, "captures": state.captures, "errors": state.errors},
+            {
+                "pid": state.pid,
+                "captures": state.captures,
+                "bindings": state.bindings,
+                "errors": state.errors,
+            },
             indent=2,
             ensure_ascii=False,
         )
@@ -976,7 +1378,7 @@ def _flush_state(state: _ProcessState) -> None:
     if state.runtime is not None:
         state.runtime.flush()
         state.calls_since_flush = 0
-        _write_state_summary(state)
+    _write_state_summary(state)
 
 
 def _flush_incrementally(state: _ProcessState) -> None:

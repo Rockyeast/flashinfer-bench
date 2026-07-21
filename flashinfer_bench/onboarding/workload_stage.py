@@ -14,11 +14,12 @@ from flashinfer_bench.onboarding.reference_tests import run_reference_test_prepa
 from flashinfer_bench.onboarding.runtime import (
     definitions_digest,
     load_definition_artifacts,
+    load_request_manifest,
+    load_sglang_execution_inventory,
     plan_for_stage,
     resolve_config,
     run_dir,
     run_modal,
-    sglang_inventory,
     write_definition_review,
     write_json,
 )
@@ -34,7 +35,19 @@ def run_dump_workload(args: argparse.Namespace) -> int:
         write_json(run_path / "config" / "run_config.json", config)
 
     definitions_dir = run_path / "definitions"
-    inventory = sglang_inventory(run_path)
+    inventory_report = load_sglang_execution_inventory(run_path)
+    inventory_modules = (
+        inventory_report.get("modules") if isinstance(inventory_report, dict) else None
+    )
+    inventory = (
+        {
+            str(item["class_path"])
+            for item in inventory_modules
+            if isinstance(item, dict) and isinstance(item.get("class_path"), str)
+        }
+        if isinstance(inventory_modules, list)
+        else None
+    )
     definition_report = check_definition_directory(
         definitions_dir, sglang_inventory=inventory, model_name=str(config["model_name"])
     )
@@ -62,10 +75,37 @@ def run_dump_workload(args: argparse.Namespace) -> int:
     plan = plan_for_stage(
         stage="workloads", run_path=run_path, config=config, reviewed_definitions=artifacts
     )
+    request_manifest = load_request_manifest(run_path)
+    if request_manifest is None:
+        raise SystemExit(
+            "ERROR: reports/evidence/request_manifest.json is required; "
+            "run dump-definition before dump-workload"
+        )
+    plan["request_manifest"] = request_manifest
+    if isinstance(inventory_modules, list):
+        plan["sglang_execution_inventory"] = {
+            "modules": [
+                {
+                    "class_path": item["class_path"],
+                    "module_paths": item.get("module_paths", []),
+                }
+                for item in inventory_modules
+                if isinstance(item, dict) and isinstance(item.get("class_path"), str)
+            ]
+        }
     result = run_modal(plan, run_path, config, args.resume_call_id)
     workload_report = result.get("workload_report")
     if not isinstance(workload_report, dict):
         raise SystemExit("ERROR: remote workload stage returned no workload report")
+    request_provenance = result.get("request_provenance")
+    if (
+        not isinstance(request_provenance, dict)
+        or request_provenance.get("manifest_sha256")
+        != request_manifest.get("manifest_sha256")
+    ):
+        raise SystemExit(
+            "ERROR: remote workload stage did not use the reviewed request manifest"
+        )
     current_digest = definitions_digest(definitions_dir)
     if (
         result.get("definitions_sha256") != plan["definitions_sha256"]
@@ -106,6 +146,7 @@ def run_dump_workload(args: argparse.Namespace) -> int:
         "definitions_sha256": current_digest,
         "workload": workload_report,
         "dataset_validation": dataset_validation,
+        "request_provenance": request_provenance,
         "accepted": accepted,
     }
     reports_dir = run_path / "reports"
