@@ -39,6 +39,7 @@ RUN_CONFIG_KEYS = {
     "isl",
     "osl",
     "random_range_ratio",
+    "requests_per_concurrency",
     "seed",
 }
 
@@ -107,11 +108,16 @@ def resolve_config(args: argparse.Namespace, run_path: Path) -> dict[str, Any]:
             "random_range_ratio": float(
                 _runtime_value(args, config, "random_range_ratio", 1.0)
             ),
+            "requests_per_concurrency": int(
+                config.get("requests_per_concurrency", 10)
+            ),
             "seed": int(_runtime_value(args, config, "seed", 0)),
         }
     )
     if resolved["tp_size"] < 1:
         raise SystemExit("ERROR: tp_size must be at least 1")
+    if resolved["requests_per_concurrency"] < 1:
+        raise SystemExit("ERROR: requests_per_concurrency must be at least 1")
     path = run_path / "config" / "run_config.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

@@ -30,6 +30,10 @@ def build_stage_plan(
             config.get("random_range_ratio", 1.0),
             "random_range_ratio",
         ),
+        requests_per_concurrency=_positive_int(
+            config.get("requests_per_concurrency", 10),
+            "requests_per_concurrency",
+        ),
         seed=_integer(config.get("seed", 0), "seed"),
     )
     plan = {
@@ -70,6 +74,7 @@ def _build_synthetic_scenarios(
     output_len: int,
     batch_sizes: list[int],
     range_ratio: float,
+    requests_per_concurrency: int,
     seed: int,
 ) -> list[dict[str, Any]]:
     """Return the bounded request matrix used by both pipeline stages."""
@@ -85,6 +90,7 @@ def _build_synthetic_scenarios(
                     output_len=output_len,
                     batch_size=batch_size,
                     range_ratio=range_ratio,
+                    requests_per_concurrency=requests_per_concurrency,
                     seed=seed + scenario_index,
                 )
             )
@@ -97,6 +103,7 @@ def _build_synthetic_scenarios(
             output_len=output_len,
             batch_size=1,
             range_ratio=range_ratio,
+            requests_per_concurrency=requests_per_concurrency,
             seed=seed + scenario_index,
             context_fraction=0.25,
         )
@@ -111,10 +118,11 @@ def _build_synthetic_scenarios(
                 f"shared_prefix_i{shared_input_len}_p{shared_input_len * 3 // 4}_"
                 f"o{output_len}_bs{shared_batch_size}"
             ),
-            input_len=shared_input_len,
+            input_len=shared_input_len // 4,
             output_len=output_len,
             batch_size=shared_batch_size,
             range_ratio=1.0,
+            requests_per_concurrency=requests_per_concurrency,
             seed=seed + scenario_index,
             shared_prefix_len=shared_input_len * 3 // 4,
         )
@@ -129,23 +137,24 @@ def _synthetic_scenario(
     output_len: int,
     batch_size: int,
     range_ratio: float,
+    requests_per_concurrency: int,
     seed: int,
     context_fraction: float | None = None,
     shared_prefix_len: int | None = None,
 ) -> dict[str, Any]:
     scenario: dict[str, Any] = {
         "name": name,
-        "source": "synthetic",
-        "input_len": input_len,
-        "output_len": output_len,
-        "batch_size": batch_size,
-        "range_ratio": range_ratio,
+        "source": "inferencex_fixed_seq",
+        "random_input_len": input_len,
+        "random_output_len": output_len,
+        "random_range_ratio": range_ratio,
+        "random_prefix_len": shared_prefix_len or 0,
+        "num_prompts": batch_size * requests_per_concurrency,
+        "max_concurrency": batch_size,
         "seed": seed,
     }
     if context_fraction is not None:
         scenario["context_fraction"] = context_fraction
-    if shared_prefix_len is not None:
-        scenario["shared_prefix_len"] = shared_prefix_len
     return scenario
 
 

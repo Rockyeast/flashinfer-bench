@@ -1,4 +1,4 @@
-"""Shared InferenceX-compatible synthetic request generation and dispatch."""
+"""InferenceX fixed-sequence request generation and dispatch."""
 
 from __future__ import annotations
 
@@ -9,6 +9,28 @@ import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Callable, Optional
+
+
+INFERENCEX_REVISION = "b1f05e9ac71859b83ff316e904289becf8dcd670"
+INFERENCEX_GENERATOR = "utils/bench_serving/benchmark_serving.py::sample_random_requests"
+INFERENCEX_RECIPE = "benchmarks/benchmark_lib.sh::run_benchmark_serving"
+
+
+def inferencex_fixed_seq_request_contract() -> dict[str, Any]:
+    """Describe the pinned InferenceX request semantics used by onboarding."""
+    return {
+        "project": "InferenceX",
+        "revision": INFERENCEX_REVISION,
+        "generator": INFERENCEX_GENERATOR,
+        "recipe": INFERENCEX_RECIPE,
+        "dataset": "random",
+        "request_rate": "inf",
+        "ignore_eos": True,
+        "use_chat_template": False,
+        "generator_workers": 1,
+        "transport": "in_process_sglang_engine",
+        "performance_metrics": False,
+    }
 
 
 @dataclass(frozen=True)
@@ -45,37 +67,43 @@ def sample_random_token_requests(
     output_len: int,
     range_ratio: float,
     seed: int | None = None,
+    prefix_len: int = 0,
 ) -> list[SyntheticRequest]:
-    """Generate requests using the random-token algorithm ported from InferenceX."""
+    """Generate requests with InferenceX's serial random-dataset algorithm."""
     import numpy as np
 
-    rng = np.random.default_rng(seed)
+    if prefix_len < 0:
+        raise ValueError("prefix_len must be non-negative")
+    rng = np.random.RandomState(seed)
     vocab_size = int(tokenizer.vocab_size)
+    prefix_token_ids = rng.randint(0, vocab_size, size=prefix_len).tolist()
 
     def sample_uniform(seq_len: int) -> list[int]:
         lower = int(seq_len * range_ratio)
-        return rng.integers(lower, seq_len + 1, size=num_prompts).tolist()
+        return rng.randint(lower, seq_len + 1, size=num_prompts).tolist()
 
     input_lens = sample_uniform(input_len)
     output_lens = sample_uniform(output_len)
-    offsets = rng.integers(0, vocab_size, size=num_prompts)
+    offsets = rng.randint(0, vocab_size, size=num_prompts)
+    local_rng = np.random.RandomState(rng.get_state()[1][:4].tolist())
 
     requests: list[SyntheticRequest] = []
     for index, target_len in enumerate(input_lens):
-        token_ids = [
+        target_prompt_len = prefix_len + target_len
+        token_ids = prefix_token_ids + [
             (int(offsets[index]) + index + position) % vocab_size
             for position in range(target_len)
         ]
         prompt = tokenizer.decode(token_ids)
 
-        # HTTP serving accepts text, so make its re-tokenized IDs the canonical input.
+        # Match InferenceX's text round-trip before storing canonical token IDs.
         for _ in range(10):
             token_ids = tokenizer.encode(prompt, add_special_tokens=False)
-            if len(token_ids) < target_len:
-                missing = target_len - len(token_ids)
-                token_ids.extend(rng.integers(0, vocab_size, size=missing).tolist())
-            elif len(token_ids) > target_len:
-                token_ids = token_ids[:target_len]
+            if len(token_ids) < target_prompt_len:
+                missing = target_prompt_len - len(token_ids)
+                token_ids.extend(local_rng.randint(0, vocab_size, size=missing).tolist())
+            elif len(token_ids) > target_prompt_len:
+                token_ids = token_ids[:target_prompt_len]
             else:
                 break
             prompt = tokenizer.decode(token_ids)
@@ -112,6 +140,7 @@ def sample_random_requests(
         output_len=output_len,
         range_ratio=range_ratio,
         seed=seed,
+        prefix_len=0,
     )
     requests = [(item.prompt, len(item.input_ids), item.output_len) for item in generated]
     if logger is not None and requests:

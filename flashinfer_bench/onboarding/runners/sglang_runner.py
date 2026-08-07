@@ -5,7 +5,6 @@ from __future__ import annotations
 import inspect
 import json
 import os
-import random
 import re
 import sys
 from contextlib import contextmanager
@@ -15,6 +14,7 @@ from typing import Any, Iterator
 from flashinfer_bench.serve.inferencex_requests import (
     SyntheticRequest,
     finalize_request_manifest,
+    inferencex_fixed_seq_request_contract,
     request_manifest_digest,
     run_engine_requests,
     sample_random_token_requests,
@@ -276,7 +276,7 @@ def _build_request_batches(engine: Any, plan: dict[str, Any]) -> list[_RequestBa
                 _RequestBatch(
                     run_name=name,
                     scenario_name=str(scenario["name"]),
-                    max_concurrency=int(scenario["batch_size"]),
+                    max_concurrency=int(scenario["max_concurrency"]),
                     requests=requests,
                     sampling_params=sampling_params,
                 )
@@ -320,10 +320,10 @@ def _build_request_manifest(
         )
     return finalize_request_manifest(
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": str(plan.get("run_id") or ""),
             "model_name": str(plan.get("model_name") or ""),
-            "generator": "inferencex_random_token_requests",
+            "request_contract": inferencex_fixed_seq_request_contract(),
             "execution_contract": _execution_contract(plan),
             "summary": {
                 "groups": len(groups),
@@ -344,6 +344,10 @@ def _request_batches_from_manifest(
         return None
     if not isinstance(manifest, dict):
         raise ValueError("request_manifest must be an object")
+    if manifest.get("schema_version") != 2:
+        raise ValueError("request_manifest.schema_version must be 2")
+    if manifest.get("request_contract") != inferencex_fixed_seq_request_contract():
+        raise ValueError("request_manifest.request_contract does not match InferenceX")
     expected_digest = manifest.get("manifest_sha256")
     if not isinstance(expected_digest, str) or request_manifest_digest(manifest) != expected_digest:
         raise ValueError("request_manifest.manifest_sha256 is invalid")
@@ -444,23 +448,34 @@ def _request_scenarios(plan: dict[str, Any]) -> list[dict[str, Any]]:
     for index, item in enumerate(value):
         if not isinstance(item, dict):
             raise ValueError(f"request_scenarios[{index}] must be an object")
-        source = str(item.get("source") or "synthetic")
-        if source != "synthetic":
+        source = str(item.get("source") or "")
+        if source != "inferencex_fixed_seq":
             raise ValueError(f"request_scenarios[{index}].source is unsupported: {source}")
         scenario = {
             "name": str(item.get("name") or f"scenario_{index + 1}"),
             "source": source,
-            "input_len": _positive_int(
-                item.get("input_len"), f"request_scenarios[{index}].input_len"
+            "random_input_len": _positive_int(
+                item.get("random_input_len"),
+                f"request_scenarios[{index}].random_input_len",
             ),
-            "output_len": _positive_int(
-                item.get("output_len"), f"request_scenarios[{index}].output_len"
+            "random_output_len": _positive_int(
+                item.get("random_output_len"),
+                f"request_scenarios[{index}].random_output_len",
             ),
-            "batch_size": _positive_int(
-                item.get("batch_size"), f"request_scenarios[{index}].batch_size"
+            "random_range_ratio": _range_ratio(
+                item.get("random_range_ratio"),
+                f"request_scenarios[{index}].random_range_ratio",
             ),
-            "range_ratio": _range_ratio(
-                item.get("range_ratio"), f"request_scenarios[{index}].range_ratio"
+            "random_prefix_len": _non_negative_int(
+                item.get("random_prefix_len"),
+                f"request_scenarios[{index}].random_prefix_len",
+            ),
+            "num_prompts": _positive_int(
+                item.get("num_prompts"), f"request_scenarios[{index}].num_prompts"
+            ),
+            "max_concurrency": _positive_int(
+                item.get("max_concurrency"),
+                f"request_scenarios[{index}].max_concurrency",
             ),
             "seed": _integer(item.get("seed"), f"request_scenarios[{index}].seed"),
         }
@@ -469,16 +484,6 @@ def _request_scenarios(plan: dict[str, Any]) -> list[dict[str, Any]]:
             scenario["context_fraction"] = _range_ratio(
                 context_fraction, f"request_scenarios[{index}].context_fraction"
             )
-        shared_prefix_len = item.get("shared_prefix_len")
-        if shared_prefix_len is not None:
-            shared_prefix_len = _positive_int(
-                shared_prefix_len, f"request_scenarios[{index}].shared_prefix_len"
-            )
-            if shared_prefix_len >= scenario["input_len"]:
-                raise ValueError(
-                    f"request_scenarios[{index}].shared_prefix_len must be smaller than input_len"
-                )
-            scenario["shared_prefix_len"] = shared_prefix_len
         scenarios.append(scenario)
     return scenarios
 
@@ -487,41 +492,15 @@ def _synthetic_token_batch(
     engine: Any, scenario: dict[str, Any], parameters: dict[str, Any], *, use_scenario_tokens: bool
 ) -> tuple[list[SyntheticRequest], list[dict[str, Any]]]:
     input_len = _effective_input_len(engine, scenario)
-    shared_prefix_len = int(scenario.get("shared_prefix_len") or 0)
-    if not shared_prefix_len:
-        requests = sample_random_token_requests(
-            _engine_tokenizer(engine),
-            num_prompts=int(scenario["batch_size"]),
-            input_len=input_len,
-            output_len=int(scenario["output_len"]),
-            range_ratio=float(scenario["range_ratio"]),
-            seed=int(scenario["seed"]),
-        )
-        return (
-            requests,
-            _sampling_params(parameters, requests, use_scenario_tokens=use_scenario_tokens),
-        )
-
-    rng = random.Random(int(scenario["seed"]))
-    batch_size = int(scenario["batch_size"])
-    ratio = float(scenario["range_ratio"])
-    input_lens = _sample_lengths(rng, input_len, ratio, batch_size)
-    output_lens = _sample_lengths(rng, int(scenario["output_len"]), ratio, batch_size)
-    vocab_size = _engine_vocab_size(engine)
-    shared_prefix_len = min(shared_prefix_len, min(input_lens))
-    shared_prefix = [rng.randrange(vocab_size) for _ in range(shared_prefix_len)]
-    tokenizer = _engine_tokenizer(engine)
-    requests = []
-    for length, output_len in zip(input_lens, output_lens):
-        suffix = [rng.randrange(vocab_size) for _ in range(length - shared_prefix_len)]
-        token_ids = [*shared_prefix, *suffix]
-        requests.append(
-            SyntheticRequest(
-                prompt=tokenizer.decode(token_ids),
-                input_ids=tuple(token_ids),
-                output_len=output_len,
-            )
-        )
+    requests = sample_random_token_requests(
+        _engine_tokenizer(engine),
+        num_prompts=int(scenario["num_prompts"]),
+        input_len=input_len,
+        output_len=int(scenario["random_output_len"]),
+        range_ratio=float(scenario["random_range_ratio"]),
+        seed=int(scenario["seed"]),
+        prefix_len=int(scenario["random_prefix_len"]),
+    )
     return requests, _sampling_params(
         parameters, requests, use_scenario_tokens=use_scenario_tokens
     )
@@ -543,16 +522,21 @@ def _sampling_params(
 
 
 def _effective_input_len(engine: Any, scenario: dict[str, Any]) -> int:
-    target = int(scenario["input_len"])
+    target = int(scenario["random_input_len"])
+    prefix_len = int(scenario["random_prefix_len"])
     context_len = _engine_context_length(engine)
     if context_len is not None:
-        target = min(target, max(context_len - int(scenario["output_len"]) - 1, 1))
+        available = context_len - int(scenario["random_output_len"]) - prefix_len - 1
+        if available < 1:
+            raise ValueError("request scenario does not fit the model context length")
+        target = min(target, available)
     fraction = scenario.get("context_fraction")
     if fraction is None:
         return target
     if context_len is None:
         return target
-    return max(min(target, int(context_len * float(fraction))), 1)
+    available = int(context_len * float(fraction)) - prefix_len
+    return max(min(target, available), 1)
 
 
 def _engine_context_length(engine: Any) -> int | None:
@@ -565,20 +549,6 @@ def _engine_context_length(engine: Any) -> int | None:
             if type(value) is int and value > 0:
                 return value
     return None
-
-
-def _sample_lengths(rng: random.Random, target: int, ratio: float, count: int) -> list[int]:
-    lower = max(int(target * ratio), 1)
-    return [rng.randint(lower, target) for _ in range(count)]
-
-
-def _engine_vocab_size(engine: Any) -> int:
-    tokenizer_manager = getattr(engine, "tokenizer_manager", None)
-    model_config = getattr(tokenizer_manager, "model_config", None)
-    vocab_size = getattr(model_config, "vocab_size", None)
-    if type(vocab_size) is not int or vocab_size < 2:
-        raise RuntimeError("SGLang Engine did not expose a valid model vocab_size")
-    return vocab_size
 
 
 def _engine_tokenizer(engine: Any) -> Any:
@@ -598,6 +568,12 @@ def _positive_int(value: Any, field: str) -> int:
 def _integer(value: Any, field: str) -> int:
     if type(value) is not int:
         raise ValueError(f"{field} must be an integer")
+    return value
+
+
+def _non_negative_int(value: Any, field: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{field} must be a non-negative integer")
     return value
 
 

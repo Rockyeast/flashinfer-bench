@@ -297,20 +297,21 @@ def _request_profile_summary(plan: dict[str, Any]) -> list[dict[str, Any]]:
     for scenario in plan.get("request_scenarios") or []:
         if not isinstance(scenario, dict):
             continue
-        if scenario.get("source") == "synthetic":
+        if scenario.get("source") == "inferencex_fixed_seq":
             summaries.append(
                 {
                     key: scenario[key]
                     for key in (
                         "name",
                         "source",
-                        "input_len",
-                        "output_len",
-                        "batch_size",
-                        "range_ratio",
+                        "random_input_len",
+                        "random_output_len",
+                        "random_range_ratio",
+                        "random_prefix_len",
+                        "num_prompts",
+                        "max_concurrency",
                         "seed",
                         "context_fraction",
-                        "shared_prefix_len",
                     )
                     if key in scenario
                 }
